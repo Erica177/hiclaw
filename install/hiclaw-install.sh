@@ -624,7 +624,7 @@ wait_manager_ready() {
 
     # Wait for OpenClaw gateway to be healthy inside the container
     while [ "${elapsed}" -lt "${timeout}" ]; do
-        if docker exec "${container}" openclaw gateway health --json 2>/dev/null | grep -q '"ok"' 2>/dev/null; then
+        if ${DOCKER_CMD} exec "${container}" openclaw gateway health --json 2>/dev/null | grep -q '"ok"' 2>/dev/null; then
             log "$(msg install.wait_ready.ok)"
             return 0
         fi
@@ -715,7 +715,7 @@ send_welcome_message() {
     local container="hiclaw-manager"
 
     # Skip if Manager has already completed soul configuration
-    if docker exec "${container}" test -f /root/manager-workspace/soul-configured 2>/dev/null; then
+    if ${DOCKER_CMD} exec "${container}" test -f /root/manager-workspace/soul-configured 2>/dev/null; then
         log "$(msg install.welcome_msg.soul_configured)"
         return 0
     fi
@@ -728,7 +728,7 @@ send_welcome_message() {
     local manager_full_id="@${manager_user}:${matrix_domain}"
 
     # Helper: run curl inside the manager container to reach Matrix directly
-    mcurl() { docker exec "${container}" curl "$@"; }
+    mcurl() { ${DOCKER_CMD} exec "${container}" curl "$@"; }
 
     # Login to get admin access token
     log "$(msg install.welcome_msg.logging_in "${admin_user}")"
@@ -1061,11 +1061,11 @@ install_manager() {
         local running_manager=""
         local running_workers=""
         local existing_workers=""
-        if docker ps --format '{{.Names}}' | grep -q "^hiclaw-manager$"; then
+        if ${DOCKER_CMD} ps --format '{{.Names}}' | grep -q "^hiclaw-manager$"; then
             running_manager="hiclaw-manager"
         fi
-        running_workers=$(docker ps --format '{{.Names}}' | grep "^hiclaw-worker-" || true)
-        existing_workers=$(docker ps -a --format '{{.Names}}' | grep "^hiclaw-worker-" || true)
+        running_workers=$(${DOCKER_CMD} ps --format '{{.Names}}' | grep "^hiclaw-worker-" || true)
+        existing_workers=$(${DOCKER_CMD} ps -a --format '{{.Names}}' | grep "^hiclaw-worker-" || true)
 
         # Non-interactive mode: default to upgrade without rebuilding workers
         if [ "${HICLAW_NON_INTERACTIVE}" = "1" ]; then
@@ -1105,10 +1105,10 @@ install_manager() {
                 fi
 
                 # Stop and remove manager container
-                if [ -n "${running_manager}" ] || docker ps -a --format '{{.Names}}' | grep -q "^hiclaw-manager$"; then
+                if [ -n "${running_manager}" ] || ${DOCKER_CMD} ps -a --format '{{.Names}}' | grep -q "^hiclaw-manager$"; then
                     log "$(msg install.existing.stopping_manager)"
-                    docker stop hiclaw-manager 2>/dev/null || true
-                    docker rm hiclaw-manager 2>/dev/null || true
+                    ${DOCKER_CMD} stop hiclaw-manager 2>/dev/null || true
+                    ${DOCKER_CMD} rm hiclaw-manager 2>/dev/null || true
                 fi
 
                 # Stop and remove worker containers (Manager IP changes on restart,
@@ -1116,8 +1116,8 @@ install_manager() {
                 if [ -n "${existing_workers}" ]; then
                     log "$(msg install.existing.stopping_workers)"
                     for w in ${existing_workers}; do
-                        docker stop "${w}" 2>/dev/null || true
-                        docker rm "${w}" 2>/dev/null || true
+                        ${DOCKER_CMD} stop "${w}" 2>/dev/null || true
+                        ${DOCKER_CMD} rm "${w}" 2>/dev/null || true
                         log "$(msg install.existing.removed "${w}")"
                     done
                 fi
@@ -1161,20 +1161,20 @@ install_manager() {
                 log "$(msg install.reinstall.confirmed)"
 
                 # Stop and remove manager container
-                docker stop hiclaw-manager 2>/dev/null || true
-                docker rm hiclaw-manager 2>/dev/null || true
+                ${DOCKER_CMD} stop hiclaw-manager 2>/dev/null || true
+                ${DOCKER_CMD} rm hiclaw-manager 2>/dev/null || true
 
                 # Stop and remove all worker containers
-                for w in $(docker ps -a --format '{{.Names}}' | grep "^hiclaw-worker-" || true); do
-                    docker stop "${w}" 2>/dev/null || true
-                    docker rm "${w}" 2>/dev/null || true
+                for w in $(${DOCKER_CMD} ps -a --format '{{.Names}}' | grep "^hiclaw-worker-" || true); do
+                    ${DOCKER_CMD} stop "${w}" 2>/dev/null || true
+                    ${DOCKER_CMD} rm "${w}" 2>/dev/null || true
                     log "$(msg install.reinstall.removed_worker "${w}")"
                 done
 
                 # Remove Docker volume
-                if docker volume ls -q | grep -q "^hiclaw-data$"; then
+                if ${DOCKER_CMD} volume ls -q | grep -q "^hiclaw-data$"; then
                     log "$(msg install.reinstall.removing_volume)"
-                    docker volume rm hiclaw-data 2>/dev/null || log "$(msg install.reinstall.warn_volume_fail)"
+                    ${DOCKER_CMD} volume rm hiclaw-data 2>/dev/null || log "$(msg install.reinstall.warn_volume_fail)"
                 fi
 
                 # Remove workspace directory
@@ -1475,15 +1475,15 @@ EOF
     fi
 
     # Remove existing container if present
-    if docker ps -a --format '{{.Names}}' | grep -q "^hiclaw-manager$"; then
+    if ${DOCKER_CMD} ps -a --format '{{.Names}}' | grep -q "^hiclaw-manager$"; then
         log "$(msg install.removing_existing)"
-        docker stop hiclaw-manager 2>/dev/null || true
-        docker rm hiclaw-manager 2>/dev/null || true
+        ${DOCKER_CMD} stop hiclaw-manager 2>/dev/null || true
+        ${DOCKER_CMD} rm hiclaw-manager 2>/dev/null || true
     fi
 
     # Check if the Docker volume is already owned by a different installation directory
-    if docker volume ls -q | grep -q "^${HICLAW_DATA_DIR}$"; then
-        EXISTING_INSTALL_PATH=$(docker volume inspect "${HICLAW_DATA_DIR}" \
+    if ${DOCKER_CMD} volume ls -q | grep -q "^${HICLAW_DATA_DIR}$"; then
+        EXISTING_INSTALL_PATH=$(${DOCKER_CMD} volume inspect "${HICLAW_DATA_DIR}" \
             --format '{{index .Labels "hiclaw.install-path"}}' 2>/dev/null || true)
         CURRENT_INSTALL_PATH="$(pwd)"
         if [ -n "${EXISTING_INSTALL_PATH}" ] && [ "${EXISTING_INSTALL_PATH}" != "${CURRENT_INSTALL_PATH}" ]; then
@@ -1503,7 +1503,7 @@ EOF
         fi
     else
         # Create the volume with an install-path label so future installs can detect conflicts
-        docker volume create --label "hiclaw.install-path=$(pwd)" "${HICLAW_DATA_DIR}" > /dev/null
+        ${DOCKER_CMD} volume create --label "hiclaw.install-path=$(pwd)" "${HICLAW_DATA_DIR}" > /dev/null
     fi
 
     # Data mount: Docker volume
@@ -1543,26 +1543,26 @@ EOF
     # Pull images (worker image must be ready before manager creates workers)
     LOCAL_IMAGE_PREFIX="hiclaw/"
     if echo "${MANAGER_IMAGE}" | grep -q "^${LOCAL_IMAGE_PREFIX}"; then
-        if docker image inspect "${MANAGER_IMAGE}" >/dev/null 2>&1; then
+        if ${DOCKER_CMD} image inspect "${MANAGER_IMAGE}" >/dev/null 2>&1; then
             log "$(msg install.image.exists "${MANAGER_IMAGE}")"
         else
             log "$(msg install.image.pulling_manager "${MANAGER_IMAGE}")"
-            docker pull "${MANAGER_IMAGE}"
+            ${DOCKER_CMD} pull "${MANAGER_IMAGE}"
         fi
     else
         log "$(msg install.image.pulling_manager "${MANAGER_IMAGE}")"
-        docker pull "${MANAGER_IMAGE}"
+        ${DOCKER_CMD} pull "${MANAGER_IMAGE}"
     fi
     if echo "${WORKER_IMAGE}" | grep -q "^${LOCAL_IMAGE_PREFIX}"; then
-        if docker image inspect "${WORKER_IMAGE}" >/dev/null 2>&1; then
+        if ${DOCKER_CMD} image inspect "${WORKER_IMAGE}" >/dev/null 2>&1; then
             log "$(msg install.image.worker_exists "${WORKER_IMAGE}")"
         else
             log "$(msg install.image.pulling_worker "${WORKER_IMAGE}")"
-            docker pull "${WORKER_IMAGE}"
+            ${DOCKER_CMD} pull "${WORKER_IMAGE}"
         fi
     else
         log "$(msg install.image.pulling_worker "${WORKER_IMAGE}")"
-        docker pull "${WORKER_IMAGE}"
+        ${DOCKER_CMD} pull "${WORKER_IMAGE}"
     fi
 
     # Run Manager container
@@ -1574,7 +1574,7 @@ EOF
         _port_prefix=""
     fi
     # shellcheck disable=SC2086
-    docker run -d \
+    ${DOCKER_CMD} run -d \
         --name hiclaw-manager \
         --env-file "${ENV_FILE}" \
         -e HOME=/root/manager-workspace \
@@ -1702,12 +1702,12 @@ install_worker() {
     # Handle reset
     if [ "${RESET}" = true ]; then
         log "$(msg worker.resetting "${WORKER_NAME}")"
-        docker stop "${CONTAINER_NAME}" 2>/dev/null || true
-        docker rm "${CONTAINER_NAME}" 2>/dev/null || true
+        ${DOCKER_CMD} stop "${CONTAINER_NAME}" 2>/dev/null || true
+        ${DOCKER_CMD} rm "${CONTAINER_NAME}" 2>/dev/null || true
     fi
 
     # Check for existing container
-    if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+    if ${DOCKER_CMD} ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
         error "$(msg worker.exists "${CONTAINER_NAME}")"
     fi
 
@@ -1729,7 +1729,7 @@ install_worker() {
     fi
 
     # shellcheck disable=SC2086
-    docker run -d \
+    ${DOCKER_CMD} run -d \
         --name "${CONTAINER_NAME}" \
         ${DOCKER_ENV} \
         --restart unless-stopped \
@@ -1750,18 +1750,17 @@ install_worker() {
 # ============================================================
 
 check_container_runtime() {
-    local cmd=""
     if command -v docker >/dev/null 2>&1; then
-        cmd="docker"
+        DOCKER_CMD="docker"
     elif command -v podman >/dev/null 2>&1; then
-        cmd="podman"
+        DOCKER_CMD="podman"
     else
         echo -e "\033[31m[HiClaw ERROR]\033[0m $(msg error.docker_not_found)" >&2
         exit 1
     fi
 
     # Command exists — check if daemon is running
-    if ! ${cmd} info >/dev/null 2>&1; then
+    if ! ${DOCKER_CMD} info >/dev/null 2>&1; then
         echo -e "\033[31m[HiClaw ERROR]\033[0m $(msg error.docker_not_running)" >&2
         exit 1
     fi
