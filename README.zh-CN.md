@@ -45,6 +45,8 @@ bash <(curl -sSL https://higress.ai/hiclaw/install.sh)
   告诉 Manager："帮我创建一个名为 alice 的前端 Worker"
 ```
 
+![安装完成](https://img.alicdn.com/imgextra/i4/O1CN01PBDwoL1sHQwIBrXEC_!!6000000005741-2-tps-784-294.png)
+
 **Windows（PowerShell 7+）：**
 
 ```powershell
