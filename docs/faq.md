@@ -1,5 +1,11 @@
 # FAQ
 
+- [Manager Agent startup timeout](#manager-agent-startup-timeout)
+- [Accessing the web UI from other devices on the LAN](#accessing-the-web-ui-from-other-devices-on-the-lan)
+- [Cannot connect to Matrix server locally](#cannot-connect-to-matrix-server-locally)
+
+---
+
 ## Manager Agent startup timeout
 
 If the Manager Agent is unresponsive after installation, check the logs inside the container:
