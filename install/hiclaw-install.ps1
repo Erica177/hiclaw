@@ -2001,7 +2001,7 @@ function Install-Manager {
                     $(if ($config.PROXY_ALLOWED_REGISTRIES) { @("-e", "HICLAW_PROXY_ALLOWED_REGISTRIES=$($config.PROXY_ALLOWED_REGISTRIES)") }) `
                     --restart unless-stopped `
                     $proxyImage
-                $dockerArgs += @("-e", "HICLAW_CONTAINER_API=http://hiclaw-orchestrator:2375")
+                $dockerArgs += @("-e", "HICLAW_ORCHESTRATOR_URL=http://hiclaw-orchestrator:2375")
                 $dockerArgs += @("--network", "hiclaw-net")
                 Write-Log (Get-Msg "docker_proxy.selected_enabled")
             } else {

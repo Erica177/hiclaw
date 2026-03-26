@@ -2283,7 +2283,7 @@ EOF
             ${HICLAW_PROXY_ALLOWED_REGISTRIES:+-e HICLAW_PROXY_ALLOWED_REGISTRIES="${HICLAW_PROXY_ALLOWED_REGISTRIES}"} \
             --restart unless-stopped \
             "${_proxy_image}"
-        PROXY_ARGS="-e HICLAW_CONTAINER_API=http://hiclaw-orchestrator:2375 --network hiclaw-net"
+        PROXY_ARGS="-e HICLAW_ORCHESTRATOR_URL=http://hiclaw-orchestrator:2375 --network hiclaw-net"
         SOCKET_MOUNT_ARGS=""  # Manager no longer needs direct socket access
     fi
 
