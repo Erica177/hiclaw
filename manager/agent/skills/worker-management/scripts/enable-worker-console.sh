@@ -99,20 +99,30 @@ else
     log "Disabling console"
 fi
 
-# --- Recreate container ---
-log "Stopping container ${CONTAINER_NAME}..."
-_api POST "/containers/${CONTAINER_NAME}/stop?t=10" > /dev/null 2>&1 || true
-sleep 1
-_api DELETE "/containers/${CONTAINER_NAME}?force=true" > /dev/null 2>&1
+# --- Recreate container via orchestrator ---
+log "Deleting worker ${WORKER_NAME}..."
+worker_backend_delete "${WORKER_NAME}" > /dev/null 2>&1 || true
 sleep 1
 
-log "Recreating container..."
-CREATE_OUTPUT=$(container_create_copaw_worker "${WORKER_NAME}" "${FS_ACCESS_KEY}" "${FS_SECRET_KEY}" "${EXTRA_ENV}" 2>&1) || true
+log "Recreating worker..."
+# Build env map from the extra env array
+ENV_MAP=$(echo "${EXTRA_ENV}" | jq '[.[] | split("=") | {(.[0]): (.[1:] | join("="))}] | add // {}')
+ENV_MAP=$(echo "${ENV_MAP}" | jq \
+    --arg name "${WORKER_NAME}" \
+    --arg fak "${FS_ACCESS_KEY}" \
+    --arg fsk "${FS_SECRET_KEY}" \
+    '. + {"HICLAW_WORKER_NAME": $name, "HICLAW_FS_ACCESS_KEY": $fak, "HICLAW_FS_SECRET_KEY": $fsk}')
 
-CONTAINER_ID=$(echo "${CREATE_OUTPUT}" | tail -1)
-CONSOLE_HOST_PORT=$(echo "${CREATE_OUTPUT}" | grep -o 'CONSOLE_HOST_PORT=[0-9]*' | head -1 | cut -d= -f2)
+CREATE_BODY=$(jq -cn \
+    --arg name "${WORKER_NAME}" \
+    --arg image "${CONTAINER_IMAGE}" \
+    --argjson env "${ENV_MAP}" \
+    '{name: $name, image: $image, runtime: "copaw", env: $env}')
 
-if [ -z "${CONTAINER_ID}" ] || [ ${#CONTAINER_ID} -lt 12 ]; then
+CREATE_OUTPUT=$(worker_backend_create "${CREATE_BODY}" 2>/dev/null) || true
+CREATE_STATUS=$(echo "${CREATE_OUTPUT}" | jq -r '.status // "error"' 2>/dev/null)
+
+if [ "${CREATE_STATUS}" != "running" ] && [ "${CREATE_STATUS}" != "starting" ]; then
     log "ERROR: Failed to recreate container"
     echo "${CREATE_OUTPUT}" >&2
     jq -n '{"error": "recreate_failed"}'
