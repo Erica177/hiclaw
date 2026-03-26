@@ -149,11 +149,24 @@ func (a *APIGBackend) CreateConsumer(_ context.Context, req ConsumerRequest) (*C
 }
 
 func (a *APIGBackend) BindConsumer(_ context.Context, req BindRequest) error {
+	// Fallback to config if not provided in request
+	modelAPIID := req.ModelAPIID
+	if modelAPIID == "" {
+		modelAPIID = a.config.ModelAPIID
+	}
+	envID := req.EnvID
+	if envID == "" {
+		envID = a.config.EnvID
+	}
+	if modelAPIID == "" || envID == "" {
+		return fmt.Errorf("model_api_id and env_id are required (neither provided in request nor configured)")
+	}
+
 	// Check if already bound
 	queryReq := &apig.QueryConsumerAuthorizationRulesRequest{}
 	queryReq.SetConsumerId(req.ConsumerID).
-		SetResourceId(req.ModelAPIID).
-		SetEnvironmentId(req.EnvID).
+		SetResourceId(modelAPIID).
+		SetEnvironmentId(envID).
 		SetResourceType("LLM").
 		SetPageNumber(1).
 		SetPageSize(100)
@@ -173,8 +186,8 @@ func (a *APIGBackend) BindConsumer(_ context.Context, req BindRequest) error {
 			ResourceType: tea.String("LLM"),
 			ExpireMode:   tea.String("LongTerm"),
 			ResourceIdentifier: &apig.CreateConsumerAuthorizationRulesRequestAuthorizationRulesResourceIdentifier{
-				ResourceId:    tea.String(req.ModelAPIID),
-				EnvironmentId: tea.String(req.EnvID),
+				ResourceId:    tea.String(modelAPIID),
+				EnvironmentId: tea.String(envID),
 			},
 		},
 	})
