@@ -158,10 +158,7 @@ _worker_has_any_tasks() {
 action_sync_status() {
     _init_lifecycle_file
 
-    local backend
-    backend=$(_detect_worker_backend)
-
-    if [ "$backend" = "none" ]; then
+    if ! container_api_available 2>/dev/null; then
         _log "No worker backend available — marking all workers as remote"
         local workers
         workers=$(_get_all_workers)
@@ -183,7 +180,7 @@ action_sync_status() {
         _ensure_worker_entry "$worker"
         local status
         status=$(worker_backend_status "$worker")
-        _log "Worker $worker: status=$status (backend=$backend)"
+        _log "Worker $worker: status=$status"
         local tmp
         tmp=$(mktemp)
         jq --arg w "$worker" --arg s "$status" --arg ts "$(_ts)" \
@@ -272,14 +269,12 @@ action_stop() {
     _init_lifecycle_file
     _ensure_worker_entry "$worker"
 
-    local backend
-    backend=$(_detect_worker_backend)
-    if [ "$backend" = "none" ]; then
+    if ! container_api_available 2>/dev/null; then
         _log "ERROR: No worker backend available"
         return 1
     fi
 
-    _log "Stopping worker $worker (backend=$backend)"
+    _log "Stopping worker $worker"
     if worker_backend_stop "$worker"; then
         local tmp
         tmp=$(mktemp)
@@ -312,8 +307,7 @@ action_start() {
     fi
 
     local backend
-    backend=$(_detect_worker_backend)
-    if [ "$backend" = "none" ]; then
+    if ! container_api_available 2>/dev/null; then
         _log "ERROR: No worker backend available"
         return 1
     fi
@@ -323,24 +317,23 @@ action_start() {
 
     local ok=false
     if [ "$status" = "not_found" ]; then
-        _log "Worker $worker not found — recreating (backend=$backend)"
+        _log "Worker $worker not found — recreating"
         local creds_file="/data/worker-creds/${worker}.env"
         if [ -f "$creds_file" ]; then
             source "$creds_file"
         fi
         local runtime
         runtime=$(jq -r --arg w "$worker" '.workers[$w].runtime // "openclaw"' "$REGISTRY_FILE" 2>/dev/null)
-        if [ "$backend" = "docker" ]; then
-            if [ "$runtime" = "copaw" ]; then
-                container_create_copaw_worker "$worker" "$worker" "${WORKER_MINIO_PASSWORD:-}" 2>&1 && ok=true
-            else
-                container_create_worker "$worker" "$worker" "${WORKER_MINIO_PASSWORD:-}" 2>&1 && ok=true
-            fi
-        else
-            worker_backend_create "$worker" "" "" "[]" 2>&1 && ok=true
-        fi
+
+        # Build create request for orchestrator
+        local create_body
+        create_body=$(jq -cn \
+            --arg name "$worker" \
+            --arg runtime "$runtime" \
+            '{name: $name, runtime: $runtime}')
+        worker_backend_create "$create_body" > /dev/null 2>&1 && ok=true
     else
-        _log "Starting worker $worker (status: $status, backend=$backend)"
+        _log "Starting worker $worker (status: $status)"
         worker_backend_start "$worker" && ok=true
     fi
 
@@ -384,8 +377,8 @@ action_ensure_ready() {
     fi
 
     local status
-    status=$(container_status_worker "$worker")
-    _log "Worker $worker container_status=$status"
+    status=$(worker_backend_status "$worker")
+    _log "Worker $worker status=$status"
 
     if [ "$status" = "running" ]; then
         echo "{\"worker\":\"$worker\",\"status\":\"ready\",\"container_status\":\"running\"}"

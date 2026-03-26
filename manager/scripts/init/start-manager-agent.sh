@@ -807,11 +807,9 @@ if container_api_available; then
                 _runtime=$(jq -r --arg w "${_worker_name}" '.workers[$w].runtime // "openclaw"' "${REGISTRY_FILE}" 2>/dev/null)
                 _recreated=false
                 for _attempt in 1 2 3; do
-                    if [ "${_runtime}" = "copaw" ]; then
-                        container_create_copaw_worker "${_worker_name}" "${_worker_name}" "${WORKER_MINIO_PASSWORD}" 2>&1 && _recreated=true && break
-                    else
-                        container_create_worker "${_worker_name}" "${_worker_name}" "${WORKER_MINIO_PASSWORD}" 2>&1 && _recreated=true && break
-                    fi
+                    local _create_body
+                    _create_body=$(jq -cn --arg name "${_worker_name}" --arg runtime "${_runtime}" '{name: $name, runtime: $runtime}')
+                    worker_backend_create "${_create_body}" > /dev/null 2>&1 && _recreated=true && break
                     log "  Attempt ${_attempt}/3 failed for ${_worker_name}, retrying in $((5 * _attempt))s..."
                     sleep $((5 * _attempt))
                 done
