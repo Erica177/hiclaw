@@ -593,31 +593,14 @@ elif container_api_available; then
             }
           else . end')
 
-    # Build extra_hosts for local domains (map *-local.hiclaw.io to Manager IP)
-    MANAGER_IP=$(container_get_manager_ip)
-    EXTRA_HOSTS="[]"
-    if [ -z "${MANAGER_IP}" ]; then
-        log "  WARNING: Could not detect Manager IP — worker may fail to resolve *-local.hiclaw.io domains"
-    fi
-    if [ -n "${MANAGER_IP}" ]; then
-        EXTRA_HOSTS=$(jq -cn --arg ip "${MANAGER_IP}" \
-            --arg matrix "${HICLAW_MATRIX_DOMAIN%%:*}" \
-            --arg matrix_client "${HICLAW_MATRIX_CLIENT_DOMAIN:-matrix-client-local.hiclaw.io}" \
-            --arg aigw "${HICLAW_AI_GATEWAY_DOMAIN:-aigw-local.hiclaw.io}" \
-            --arg fs "${HICLAW_FS_DOMAIN:-fs-local.hiclaw.io}" \
-            '[$matrix, $matrix_client, $aigw, $fs] | map(select(endswith("-local.hiclaw.io"))) | map(. + ":" + $ip)')
-    fi
-
     # Build create request body
     CREATE_BODY=$(jq -cn \
         --arg name "${WORKER_NAME}" \
         --arg image "${CUSTOM_IMAGE:-}" \
         --arg runtime "${WORKER_RUNTIME}" \
         --argjson env "${WORKER_ENV}" \
-        --argjson extra_hosts "${EXTRA_HOSTS}" \
         '{name: $name, runtime: $runtime, env: $env}
-         | if $image != "" then . + {image: $image} else . end
-         | if ($extra_hosts | length) > 0 then . + {extra_hosts: $extra_hosts} else . end')
+         | if $image != "" then . + {image: $image} else . end')
 
     CREATE_OUTPUT=$(worker_backend_create "${CREATE_BODY}" 2>/dev/null) || true
     log "  Create response: ${CREATE_OUTPUT:0:300}"
@@ -626,12 +609,7 @@ elif container_api_available; then
     CONTAINER_ID=$(echo "${CREATE_OUTPUT}" | jq -r '.container_id // empty' 2>/dev/null)
 
     if [ "${CREATE_STATUS}" = "running" ] || [ "${CREATE_STATUS}" = "starting" ]; then
-        DEPLOY_MODE=$(echo "${CREATE_OUTPUT}" | jq -r '.backend // "local"' 2>/dev/null)
-        if [ "${DEPLOY_MODE}" = "docker" ]; then
-            DEPLOY_MODE="local"
-        elif [ "${DEPLOY_MODE}" = "sae" ]; then
-            DEPLOY_MODE="cloud"
-        fi
+        DEPLOY_MODE=$(echo "${CREATE_OUTPUT}" | jq -r '.deployment_mode // "local"' 2>/dev/null)
 
         # Wait for worker to report ready (unified — works for both Docker and SAE)
         log "  Waiting for Worker agent to be ready..."
