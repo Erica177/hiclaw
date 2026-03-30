@@ -118,6 +118,7 @@ helm upgrade --install hiclaw ./helm/hiclaw \
   -f ./helm/values.yaml \
   --set orchestrator.rrsa.roleName='Orchestrator RRSA 角色短名（webhook 用）' \
   --set orchestrator.rrsa.manual.roleArn='Orchestrator RAM OIDC 角色 ARN' \
+  --set orchestrator.env.HICLAW_GW_GATEWAY_ID='AI 网关ID' \
   --set-string global.rrsa.oidcProviderArn='集群 RRSA OIDC Provider ARN（Manager/Orchestrator 共用）' \
   --set manager.rrsa.roleName='Manager RRSA 角色短名（webhook 用）' \
   --set manager.rrsa.manual.roleArn='Manager RAM OIDC 角色 ARN' \
