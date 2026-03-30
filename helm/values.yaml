@@ -13,11 +13,13 @@
 global:
   namespace: hiclaw
   platform: ack
+  rrsa:
+    oidcProviderArn: ""
 
 image:
   repository: registry.cn-hangzhou.aliyuncs.com/hiclaw-cloud/hiclaw-manager
   pullPolicy: IfNotPresent
-  tag: v1.0.0
+  tag: v1.0.3
 
 imagePullSecrets: []
 
@@ -37,14 +39,13 @@ manager:
     type: "tcp"                 # "tcp" or "http"
     interval: "5"               # Health check interval (seconds)
     healthyThreshold: "2"       # Consecutive successes to mark healthy
-    unhealthyThreshold: "12"     # Consecutive failures to mark unhealthy
+    unhealthyThreshold: "120"     # Consecutive failures to mark unhealthy
   rrsa:
     enabled: true
     mode: manual
     roleName: ""
     manual:
       roleArn: ""
-      oidcProviderArn: ""
       tokenMountPath: /var/run/secrets/ack.alibabacloud.com/rrsa-tokens
       tokenFile: /var/run/secrets/ack.alibabacloud.com/rrsa-tokens/token
       expirationSeconds: 3600
@@ -82,7 +83,7 @@ orchestrator:
   image:
     repository: registry.cn-hangzhou.aliyuncs.com/hiclaw-cloud/hiclaw-orchestrator
     pullPolicy: IfNotPresent
-    tag: v1.0.0
+    tag: v1.0.2
   service:
     type: ClusterIP
     port: 2375
@@ -104,7 +105,6 @@ orchestrator:
     roleName: ""
     manual:
       roleArn: ""
-      oidcProviderArn: ""
       tokenMountPath: /var/run/secrets/ack.alibabacloud.com/rrsa-tokens
       tokenFile: /var/run/secrets/ack.alibabacloud.com/rrsa-tokens/token
       expirationSeconds: 3600

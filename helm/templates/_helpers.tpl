@@ -258,6 +258,13 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- printf "%s/%s:%s" .Values.elementWeb.image.registry .Values.elementWeb.image.repository .Values.elementWeb.image.tag }}
 {{- end }}
 
+{{/* RRSA: cluster OIDC Provider ARN — shared by Manager / Orchestrator (manual mode) */}}
+{{- define "hiclaw.rrsa.oidcProviderArn" -}}
+{{- if and .Values.global .Values.global.rrsa -}}
+{{- default "" .Values.global.rrsa.oidcProviderArn -}}
+{{- end -}}
+{{- end }}
+
 {{/* RRSA: ack-pod-identity-webhook (SA annotation + optional namespace injection) */}}
 {{- define "hiclaw.manager.rrsaWebhook" -}}
 {{- if and .Values.manager.rrsa.enabled (eq (.Values.manager.rrsa.mode | default "manual") "webhook") .Values.manager.rrsa.roleName -}}true{{- end -}}
@@ -265,7 +272,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 
 {{/* RRSA: manual projected token + env — same as ACK doc "手动修改应用模板使用RRSA功能" */}}
 {{- define "hiclaw.manager.rrsaManual" -}}
-{{- if and .Values.manager.rrsa.enabled (eq (.Values.manager.rrsa.mode | default "manual") "manual") .Values.manager.rrsa.manual.roleArn .Values.manager.rrsa.manual.oidcProviderArn -}}true{{- end -}}
+{{- if and .Values.manager.rrsa.enabled (eq (.Values.manager.rrsa.mode | default "manual") "manual") .Values.manager.rrsa.manual.roleArn (include "hiclaw.rrsa.oidcProviderArn" .) -}}true{{- end -}}
 {{- end }}
 
 {{- define "hiclaw.orchestrator.rrsaWebhook" -}}
@@ -273,5 +280,5 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end }}
 
 {{- define "hiclaw.orchestrator.rrsaManual" -}}
-{{- if and .Values.orchestrator.rrsa.enabled (eq (.Values.orchestrator.rrsa.mode | default "manual") "manual") .Values.orchestrator.rrsa.manual.roleArn .Values.orchestrator.rrsa.manual.oidcProviderArn -}}true{{- end -}}
+{{- if and .Values.orchestrator.rrsa.enabled (eq (.Values.orchestrator.rrsa.mode | default "manual") "manual") .Values.orchestrator.rrsa.manual.roleArn (include "hiclaw.rrsa.oidcProviderArn" .) -}}true{{- end -}}
 {{- end }}

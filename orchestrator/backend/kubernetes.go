@@ -91,6 +91,7 @@ func NewK8sBackendWithClient(client K8sCoreClient, config K8sConfig, containerPr
 }
 
 func (k *K8sBackend) Name() string                   { return "k8s" }
+func (k *K8sBackend) DeploymentMode() string         { return DeployCloud }
 func (k *K8sBackend) NeedsCredentialInjection() bool { return true }
 
 func (k *K8sBackend) Available(_ context.Context) bool {
@@ -246,10 +247,11 @@ func (k *K8sBackend) Status(ctx context.Context, name string) (*WorkerResult, er
 		return nil, fmt.Errorf("kubernetes get pod %s: %w", k.workerPodName(name), err)
 	}
 	return &WorkerResult{
-		Name:      name,
-		Backend:   "k8s",
-		Status:    normalizeK8sPodPhase(pod.Status.Phase),
-		RawStatus: rawK8sPhase(pod.Status.Phase),
+		Name:           name,
+		Backend:        "k8s",
+		DeploymentMode: DeployCloud,
+		Status:         normalizeK8sPodPhase(pod.Status.Phase),
+		RawStatus:      rawK8sPhase(pod.Status.Phase),
 	}, nil
 }
 
@@ -268,10 +270,11 @@ func (k *K8sBackend) List(ctx context.Context) ([]WorkerResult, error) {
 			name = strings.TrimPrefix(pod.Name, k.containerPrefix)
 		}
 		results = append(results, WorkerResult{
-			Name:      name,
-			Backend:   "k8s",
-			Status:    normalizeK8sPodPhase(pod.Status.Phase),
-			RawStatus: rawK8sPhase(pod.Status.Phase),
+			Name:           name,
+			Backend:        "k8s",
+			DeploymentMode: DeployCloud,
+			Status:         normalizeK8sPodPhase(pod.Status.Phase),
+			RawStatus:      rawK8sPhase(pod.Status.Phase),
 		})
 	}
 	return results, nil

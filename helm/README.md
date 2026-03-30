@@ -24,11 +24,11 @@
 
 ### RRSA 与 Pod 身份
 
-**要做什么**：在 ACK 集群上**开启 RRSA**，记下 **OIDC Issuer** 与控制台中的 **OIDC Provider ARN** 等信息，后续要写入 Chart 的 **`manager.rrsa.manual.oidcProviderArn`** 等字段。HiClaw 通过 **RAM OIDC 角色**让 Pod 用 **STS** 访问 OSS 等云服务，一般不在 Pod 内长期放主账号 AK。
+**要做什么**：在 ACK 集群上**开启 RRSA**，记下 **OIDC Issuer** 与控制台中的 **OIDC Provider ARN** 等信息，后续写入 Chart 的 **`global.rrsa.oidcProviderArn`**（**Manager** 与 **Orchestrator** 在 manual 模式下共用）。HiClaw 通过 **RAM OIDC 角色**让 Pod 用 **STS** 访问 OSS 等云服务，一般不在 Pod 内长期放主账号 AK。
 
 与 Chart 对齐时二选一（与 **`manager.rrsa.mode` / `orchestrator.rrsa.mode`** 一致）：
 
-- **Manual（Chart 默认）**：按 ACK 文档在应用模板里挂 **projected `serviceAccountToken`**（`audience: sts.aliyuncs.com`），并配置 **`ALIBABA_CLOUD_ROLE_ARN`**、**`ALIBABA_CLOUD_OIDC_PROVIDER_ARN`**、**`ALIBABA_CLOUD_OIDC_TOKEN_FILE`**。在 `values.yaml` 填写 **`manager.rrsa.manual.roleArn`**、**`manager.rrsa.manual.oidcProviderArn`**、**`orchestrator.rrsa.manual.roleArn`**、**`orchestrator.rrsa.manual.oidcProviderArn`**。Worker 不再绑定独立 ServiceAccount，也不再直接持有 RRSA 身份。
+- **Manual（Chart 默认）**：按 ACK 文档在应用模板里挂 **projected `serviceAccountToken`**（`audience: sts.aliyuncs.com`），并配置 **`ALIBABA_CLOUD_ROLE_ARN`**、**`ALIBABA_CLOUD_OIDC_PROVIDER_ARN`**、**`ALIBABA_CLOUD_OIDC_TOKEN_FILE`**。在 `values.yaml` 填写 **`global.rrsa.oidcProviderArn`**（集群 OIDC Provider，二者共用），以及 **`manager.rrsa.manual.roleArn`**、**`orchestrator.rrsa.manual.roleArn`**。Worker 不再绑定独立 ServiceAccount，也不再直接持有 RRSA 身份。
 - **Webhook**：安装 **`ack-pod-identity-webhook`**，在 Chart 中设 **`manager.rrsa.mode: webhook`**、**`orchestrator.rrsa.mode: webhook`**，并填写 RAM 角色**短名** **`manager.rrsa.roleName`** / **`orchestrator.rrsa.roleName`**；若需命名空间级注入，可设 **`global.podIdentity.namespaceInjection: true`** 或为命名空间打 **`pod-identity.alibabacloud.com/injection=on`**。
 
 **文档**：[使用 RRSA 授权 Pod 访问云服务](https://help.aliyun.com/zh/ack/ack-managed-and-ack-dedicated/user-guide/use-rrsa-to-authorize-pods-to-access-different-cloud-services) · [ack-pod-identity-webhook](https://help.aliyun.com/zh/ack/product-overview/ack-pod-identity-webhook)
@@ -53,7 +53,7 @@
 
 ### 访问控制 RAM
 
-**要做什么**：为 **Manager**、**Worker** 各创建一个 **OIDC 信任**的 RAM 角色（Issuer / Subject / Audience 须与**当前集群** RRSA 文档一致，勿照抄旧示例 ARN）。**Manager 角色**：至少覆盖 **`oss://<bucket>/hiclaw/...`** 等对象操作，并按需增加 **APIG / 其它云 API** 权限，遵循最小权限。**Worker 角色**：建议**仅 OSS 对象**相关权限（如 Get/Put/Delete/List/Head 及带 prefix 的 ListBucket 等），**不要**与 Manager 同权。将 **Manager 角色 ARN**、**OIDC Provider ARN** 等写入 Chart；**Worker 角色 ARN** 供 Worker Pod 使用。
+**要做什么**：为 **Manager**、**Worker** 各创建一个 **OIDC 信任**的 RAM 角色（Issuer / Subject / Audience 须与**当前集群** RRSA 文档一致，勿照抄旧示例 ARN）。**Manager 角色**：至少覆盖 **`oss://<bucket>/hiclaw/...`** 等对象操作，并按需增加 **APIG / 其它云 API** 权限，遵循最小权限。**Worker 角色**：建议**仅 OSS 对象**相关权限（如 Get/Put/Delete/List/Head 及带 prefix 的 ListBucket 等），**不要**与 Manager 同权。将 **Manager / Orchestrator 的 RAM 角色 ARN** 与集群 **`global.rrsa.oidcProviderArn`** 写入 Chart。
 
 Chart 会为 **Manager / Orchestrator** 分别创建 **Kubernetes ServiceAccount**。集群内 **RBAC**（创建 Pod、exec、日志等）只授予 **Orchestrator 的 SA**，Manager 通过 **`HICLAW_ORCHESTRATOR_URL`** 调用它。Worker Pod 由 Orchestrator 直接创建，不再绑定独立 ServiceAccount。
 
@@ -81,10 +81,9 @@ Chart 会为 **Manager / Orchestrator** 分别创建 **Kubernetes ServiceAccount
 |------------------------------|------|
 | `orchestrator.rrsa.roleName` | Orchestrator **webhook** 模式下的 RAM 角色短名 |
 | `orchestrator.rrsa.manual.roleArn` | Orchestrator Pod **AssumeRoleWithOIDC** 使用的 **RAM 角色 ARN** |
-| `orchestrator.rrsa.manual.oidcProviderArn` | Orchestrator 使用的 **RRSA OIDC Provider ARN** |
+| `global.rrsa.oidcProviderArn` | 集群 **RRSA OIDC Provider ARN**（与 ACK 控制台一致；**Manager / Orchestrator** manual 模式共用） |
 | `manager.rrsa.roleName` | Manager **webhook** 模式下的 RAM 角色短名 |
 | `manager.rrsa.manual.roleArn` | Manager Pod **AssumeRoleWithOIDC** 使用的 **RAM 角色 ARN**（manual RRSA） |
-| `manager.rrsa.manual.oidcProviderArn` | 集群 **RRSA OIDC Provider ARN**（与 ACK 控制台 RRSA 一致） |
 | `manager.resources.requests.cpu` | Manager Deployment **requests.cpu** |
 | `manager.resources.requests.memory` | Manager Deployment **requests.memory**（如 `2Gi`） |
 | `manager.secret.stringData.HICLAW_AI_GATEWAY_URL` | **LLM / AI 网关（APIG）** 出站地址；**同时作为 Element Web 的 `MATRIX_SERVER_URL` 默认值**（除非你另设 `elementWeb.env.MATRIX_SERVER_URL`） |
@@ -116,13 +115,12 @@ Chart 会为 **Manager / Orchestrator** 分别创建 **Kubernetes ServiceAccount
 helm upgrade --install hiclaw ./helm/hiclaw \
   --namespace hiclaw \
   --create-namespace \
-  -f ./helm/hiclaw/values.yaml \
+  -f ./helm/values.yaml \
   --set orchestrator.rrsa.roleName='Orchestrator RRSA 角色短名（webhook 用）' \
   --set orchestrator.rrsa.manual.roleArn='Orchestrator RAM OIDC 角色 ARN' \
-  --set orchestrator.rrsa.manual.oidcProviderArn='Orchestrator 使用的 RRSA OIDC Provider ARN' \
+  --set-string global.rrsa.oidcProviderArn='集群 RRSA OIDC Provider ARN（Manager/Orchestrator 共用）' \
   --set manager.rrsa.roleName='Manager RRSA 角色短名（webhook 用）' \
   --set manager.rrsa.manual.roleArn='Manager RAM OIDC 角色 ARN' \
-  --set manager.rrsa.manual.oidcProviderArn='集群 RRSA OIDC Provider ARN' \
   --set manager.resources.requests.cpu='Manager requests.cpu，如 2' \
   --set-string manager.resources.requests.memory='Manager requests.memory，如 2Gi' \
   --set-string manager.secret.stringData.HICLAW_AI_GATEWAY_URL='AI 网关 APIG 出站 URL' \

@@ -69,7 +69,7 @@ spec:
             - name: ALIBABA_CLOUD_ROLE_ARN
               value: {{ .Values.manager.rrsa.manual.roleArn | quote }}
             - name: ALIBABA_CLOUD_OIDC_PROVIDER_ARN
-              value: {{ .Values.manager.rrsa.manual.oidcProviderArn | quote }}
+              value: {{ include "hiclaw.rrsa.oidcProviderArn" . | quote }}
             - name: ALIBABA_CLOUD_OIDC_TOKEN_FILE
               value: {{ .Values.manager.rrsa.manual.tokenFile | quote }}
             {{- end }}

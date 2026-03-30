@@ -170,3 +170,4 @@ Record image-affecting changes to `manager/`, `worker/`, `openclaw-base/` here b
 - fix(controller): support HICLAW_NACOS_USERNAME/PASSWORD as default Nacos credentials ([ccf242c](https://github.com/alibaba/hiclaw/commit/ccf242c))
 - refactor(network): replace ExtraHosts IP injection with Docker network aliases ([0eb635d](https://github.com/alibaba/hiclaw/commit/0eb635d))
 - refactor: unify DM room creation into manager agent startup ([0569d1a](https://github.com/alibaba/hiclaw/commit/0569d1a))
+- fix(orchestrator): register K8s worker backend in `buildBackends` when `HICLAW_WORKER_BACKEND=k8s` or auto (no SAE) — fixes `no worker backend available` on ACK/ACS where Docker socket is absent
