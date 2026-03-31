@@ -17,19 +17,19 @@ global:
     oidcProviderArn: ""
 
 image:
-  repository: registry.cn-hangzhou.aliyuncs.com/hiclaw-cloud/hiclaw-manager
+  repository: higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/hiclaw-manager
   pullPolicy: IfNotPresent
-  tag: v1.0.3
+  tag: latest_accelerated
 
 imagePullSecrets: []
 
 workerImage:
-  repository: registry.cn-hangzhou.aliyuncs.com/hiclaw-cloud/hiclaw-worker
-  tag: v1.0.0
+  repository: higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/hiclaw-worker
+  tag: latest_accelerated
 
 copawWorkerImage:
-  repository: registry.cn-hangzhou.aliyuncs.com/hiclaw-cloud/hiclaw-copaw-worker
-  tag: v1.0.0
+  repository: higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/hiclaw-copaw-worker
+  tag: latest_accelerated
 
 workerRuntime: "openclaw"
 
@@ -81,9 +81,9 @@ manager:
 
 orchestrator:
   image:
-    repository: registry.cn-hangzhou.aliyuncs.com/hiclaw-cloud/hiclaw-orchestrator
+    repository: higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/hiclaw-orchestrator
     pullPolicy: IfNotPresent
-    tag: v1.0.4
+    tag: latest_accelerated
   service:
     type: ClusterIP
     port: 2375
