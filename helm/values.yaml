@@ -39,7 +39,7 @@ manager:
     type: "tcp"                 # "tcp" or "http"
     interval: "5"               # Health check interval (seconds)
     healthyThreshold: "2"       # Consecutive successes to mark healthy
-    unhealthyThreshold: "120"     # Consecutive failures to mark unhealthy
+    unhealthyThreshold: "30"     # Consecutive failures to mark unhealthy
   rrsa:
     enabled: true
     mode: manual
@@ -172,7 +172,7 @@ tuwunel:
     existingClaim: ""
     mountPath: /data/conduwuit
     nas:
-      server: "0.0.0.0"
+      server: ""
     acs:
       mountOptions: "nolock,tcp,noresvport"
       storageClassName: "alibaba-cloud-nas"
