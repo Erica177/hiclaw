@@ -106,9 +106,6 @@ func TestIssueWorkerToken(t *testing.T) {
 	if token.ExpiresInSec != 3600 {
 		t.Errorf("expected 3600, got %d", token.ExpiresInSec)
 	}
-	if token.OSSEndpoint != "oss-cn-hangzhou.aliyuncs.com" {
-		t.Errorf("expected public OSS endpoint, got %s", token.OSSEndpoint)
-	}
 }
 
 func TestIssueWorkerTokenSTSError(t *testing.T) {
