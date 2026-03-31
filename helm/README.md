@@ -28,7 +28,7 @@
 
 与 Chart 对齐时二选一（与 **`manager.rrsa.mode` / `orchestrator.rrsa.mode`** 一致）：
 
-- **Manual（Chart 默认）**：按 ACK 文档在应用模板里挂 **projected `serviceAccountToken`**（`audience: sts.aliyuncs.com`），并配置 **`ALIBABA_CLOUD_ROLE_ARN`**、**`ALIBABA_CLOUD_OIDC_PROVIDER_ARN`**、**`ALIBABA_CLOUD_OIDC_TOKEN_FILE`**。在 `values.yaml` 填写 **`global.rrsa.oidcProviderArn`**（集群 OIDC Provider，二者共用），以及 **`manager.rrsa.manual.roleArn`**、**`orchestrator.rrsa.manual.roleArn`**。Worker 不再绑定独立 ServiceAccount，也不再直接持有 RRSA 身份。
+- **Manual（Chart 默认）**：按 ACK 文档在应用模板里挂 **projected `serviceAccountToken`**（`audience: sts.aliyuncs.com`），并配置 **`ALIBABA_CLOUD_ROLE_ARN`**、**`ALIBABA_CLOUD_OIDC_PROVIDER_ARN`**、**`ALIBABA_CLOUD_OIDC_TOKEN_FILE`**。在 `values.yaml` 填写 **`global.rrsa.oidcProviderArn`**（集群 OIDC Provider，二者共用），以及 **`manager.rrsa.manual.roleArn`**、**`orchestrator.rrsa.manual.roleArn`**。由 Orchestrator 创建的 **Worker Pod** 不绑定独立 RRSA ServiceAccount；OSS 凭证由 Orchestrator **STS** 代发（见下文「K8s Worker、OSS 与 Orchestrator STS」）。
 - **Webhook**：安装 **`ack-pod-identity-webhook`**，在 Chart 中设 **`manager.rrsa.mode: webhook`**、**`orchestrator.rrsa.mode: webhook`**，并填写 RAM 角色**短名** **`manager.rrsa.roleName`** / **`orchestrator.rrsa.roleName`**；若需命名空间级注入，可设 **`global.podIdentity.namespaceInjection: true`** 或为命名空间打 **`pod-identity.alibabacloud.com/injection=on`**。
 
 **文档**：[使用 RRSA 授权 Pod 访问云服务](https://help.aliyun.com/zh/ack/ack-managed-and-ack-dedicated/user-guide/use-rrsa-to-authorize-pods-to-access-different-cloud-services) · [ack-pod-identity-webhook](https://help.aliyun.com/zh/ack/product-overview/ack-pod-identity-webhook)
@@ -53,9 +53,9 @@
 
 ### 访问控制 RAM
 
-**要做什么**：为 **Manager**、**Worker** 各创建一个 **OIDC 信任**的 RAM 角色（Issuer / Subject / Audience 须与**当前集群** RRSA 文档一致，勿照抄旧示例 ARN）。**Manager 角色**：至少覆盖 **`oss://<bucket>/hiclaw/...`** 等对象操作，并按需增加 **APIG / 其它云 API** 权限，遵循最小权限。**Worker 角色**：建议**仅 OSS 对象**相关权限（如 Get/Put/Delete/List/Head 及带 prefix 的 ListBucket 等），**不要**与 Manager 同权。将 **Manager / Orchestrator 的 RAM 角色 ARN** 与集群 **`global.rrsa.oidcProviderArn`** 写入 Chart。
+**要做什么**：为 **Manager**、**Orchestrator** 各配置 **OIDC 信任**的 RAM 角色（Issuer / Subject / Audience 须与**当前集群** RRSA 文档一致，勿照抄旧示例 ARN）。**Manager 角色**：至少覆盖 **`oss://<bucket>/hiclaw/...`** 等对象操作，并按需增加 **APIG / 其它云 API** 权限，遵循最小权限。**Orchestrator 角色**：需能 **AssumeRoleWithOIDC** 代 Worker 申请 **STS 临时凭证**（与访问同一 OSS Bucket 的策略一致；实际对象前缀仍由 STS 内联策略限制在 `agents/{worker}/*` 与 `shared/*`）。在 **ACK + Helm + `HICLAW_WORKER_BACKEND=k8s`** 场景下，Worker Pod **通常不再挂独立 RRSA**，而是通过 **`HICLAW_ORCHESTRATOR_URL`** 与 Orchestrator 签发的 **`HICLAW_WORKER_API_KEY`** 调用 **`POST /credentials/sts`** 获取 OSS 凭证；因此 **务必**在 Secret 中配置 **`HICLAW_ORCHESTRATOR_API_KEY`**（与 Manager 一致），否则 Worker 无法正常同步 OSS。将 **Manager / Orchestrator 的 RAM 角色 ARN** 与集群 **`global.rrsa.oidcProviderArn`** 写入 Chart。
 
-Chart 会为 **Manager / Orchestrator** 分别创建 **Kubernetes ServiceAccount**。集群内 **RBAC**（创建 Pod、exec、日志等）只授予 **Orchestrator 的 SA**，Manager 通过 **`HICLAW_ORCHESTRATOR_URL`** 调用它。Worker Pod 由 Orchestrator 直接创建，不再绑定独立 ServiceAccount。
+Chart 会为 **Manager / Orchestrator** 分别创建 **Kubernetes ServiceAccount**。集群内 **RBAC**（创建 Pod、exec、日志等）见 **`templates/backend/kubernetes.yaml`**（`rbac.create` 为 true 时下发）；Manager 通过 **`HICLAW_ORCHESTRATOR_URL`** 调用 Orchestrator。Worker Pod 由 Orchestrator 直接创建，默认 **`automountServiceAccountToken: false`**，不单独绑定 RRSA。
 
 **文档**：[创建 OIDC RAM 角色](https://help.aliyun.com/zh/ram/developer-reference/create-role-oidc) · [为角色授权](https://help.aliyun.com/zh/ram/user-guide/grant-permissions-to-a-role) · [RAM 文档中心](https://help.aliyun.com/zh/ram/)
 
@@ -71,7 +71,7 @@ Chart 会为 **Manager / Orchestrator** 分别创建 **Kubernetes ServiceAccount
 
 ## 安装步骤
 
-在**仓库根目录**执行。默认 **`-f ./helm/hiclaw/values.yaml`**，用 **`--set`** / **`--set-string`** 覆盖环境与集群相关参数。**勿将真实密钥写入 Git**；生产可用未入库的 `-f extra.yaml` 或 **`manager.envFromSecret`**。
+在**仓库根目录**执行。Chart 路径为 **`./helm`**（`Chart.yaml` 与 `values.yaml` 均在该目录下），用 **`-f ./helm/values.yaml`** 并结合 **`--set`** / **`--set-string`** 覆盖环境与集群相关参数。**勿将真实密钥写入 Git**；生产可用未入库的 `-f extra.yaml` 或 **`manager.envFromSecret`**。
 
 含逗号、URL、`500m`/`2Gi` 等易被 shell 或 Helm 误解析的值，请用 **`--set-string`**。
 
@@ -90,7 +90,7 @@ Chart 会为 **Manager / Orchestrator** 分别创建 **Kubernetes ServiceAccount
 | `manager.secret.stringData.HICLAW_OSS_BUCKET` | **OSS Bucket** 名称（与 RAM 策略前缀一致） |
 | `manager.secret.stringData.HICLAW_MANAGER_PASSWORD` | Manager 在 Matrix 上的账户密码 |
 | `manager.secret.stringData.HICLAW_MANAGER_GATEWAY_KEY` | Higress / APIG **Consumer** 密钥（与网关配置一致） |
-| `manager.secret.stringData.HICLAW_ORCHESTRATOR_API_KEY` | Manager 调用 Orchestrator API 使用的共享 Bearer Token（为空则关闭鉴权） |
+| `manager.secret.stringData.HICLAW_ORCHESTRATOR_API_KEY` | **强烈建议填写**：Manager 与 Orchestrator 共用的 Bearer Token；Orchestrator 凭此启用 API 鉴权并为每个 K8s Worker 下发 **`HICLAW_WORKER_API_KEY`** 以调用 **`/credentials/sts`**。为空则关闭鉴权且 Worker 无法获得 STS 子密钥（云上 Worker 会拉 OSS 失败） |
 | `manager.secret.stringData.HICLAW_REGISTRATION_TOKEN` | Matrix **开放注册** Token（与 Tuwunel **`CONDUWUIT_REGISTRATION_TOKEN`** 同源：同一 Secret 的 `HICLAW_REGISTRATION_TOKEN` 键） |
 | `manager.secret.stringData.HICLAW_ADMIN_USER` | 管理后台用户名 |
 | `manager.secret.stringData.HICLAW_ADMIN_PASSWORD` | 管理后台密码 |
@@ -112,7 +112,7 @@ Chart 会为 **Manager / Orchestrator** 分别创建 **Kubernetes ServiceAccount
 下列命令中 **`'...'`** 内为**说明占位**，请替换为真实值（示例命名空间 **`hiclaw`**、release 名 **`hiclaw`**）：
 
 ```bash
-helm upgrade --install hiclaw ./helm/hiclaw \
+helm upgrade --install hiclaw ./helm \
   --namespace hiclaw \
   --create-namespace \
   -f ./helm/values.yaml \
@@ -128,7 +128,7 @@ helm upgrade --install hiclaw ./helm/hiclaw \
   --set-string manager.secret.stringData.HICLAW_OSS_BUCKET='OSS Bucket 名' \
   --set-string manager.secret.stringData.HICLAW_MANAGER_PASSWORD='Manager Matrix 账户密码' \
   --set-string manager.secret.stringData.HICLAW_MANAGER_GATEWAY_KEY='网关 Consumer 密钥' \
-  --set-string manager.secret.stringData.HICLAW_ORCHESTRATOR_API_KEY='Manager 与 Orchestrator 之间的 API Token（可选）' \
+  --set-string manager.secret.stringData.HICLAW_ORCHESTRATOR_API_KEY='Manager 与 Orchestrator 之间的 API Token（K8s Worker 建议必填）' \
   --set-string manager.secret.stringData.HICLAW_REGISTRATION_TOKEN='Matrix 开放注册 Token' \
   --set-string manager.secret.stringData.HICLAW_ADMIN_USER='管理后台用户名' \
   --set-string manager.secret.stringData.HICLAW_ADMIN_PASSWORD='管理后台密码' \
@@ -144,7 +144,14 @@ helm upgrade --install hiclaw ./helm/hiclaw \
 - **`HICLAW_REGISTRATION_TOKEN`**：Manager 与 Tuwunel **共用**——Tuwunel 通过 **`valueFrom.secretKeyRef`** 读取与 Manager 相同的 Secret 键；无 `envFrom` Secret 时回退为 `manager.secret.stringData` 或 **`manager.env.HICLAW_REGISTRATION_TOKEN`**。
 - **`tuwunel.persistence.nas.server`** 同时用于 **ACK**（PV `server`）与 **ACS**（`csi.alibabacloud.com/mountpoint`），**一条即可**。
 - **`platform=acs`** 时：配置 **`tuwunel.persistence.acs.storageClassName`** 等（见 `values.yaml`），并设 **`tuwunel.persistence.pv.enabled=false`**（勿再下发 ACK 静态 PV）。
-- 镜像、**`manager.env.HICLAW_RUNTIME`**、**`orchestrator.env`** 等仍可由 **`values.yaml`** 提供；Orchestrator 默认会继承 `manager.env` 中的云端相关环境变量。
+- 镜像、**`manager.env.HICLAW_RUNTIME`**、**`orchestrator.env`** 等仍可由 **`values.yaml`** 提供；Orchestrator 默认会继承 `manager.env` 中的云端相关环境变量（如 **`HICLAW_GW_*`**）；**`workerImage`** / **`copawWorkerImage`** / **`workerRuntime`**（`openclaw` \| `copaw`）决定 Orchestrator 创建的 Worker 镜像与运行时。
+
+### K8s Worker、OSS 与 Orchestrator STS
+
+- **同一 Secret**：Manager 与 Orchestrator 均通过 **`envFrom`** 挂载 chart 管理的 **`manager.secret`**（或 `manager.envFromSecret`），因此 **`HICLAW_OSS_BUCKET`**、**`HICLAW_ORCHESTRATOR_API_KEY`** 等在两者进程中一致；无需在 Orchestrator Deployment 上重复手写（除非使用外部 Secret 且键名一致）。
+- **创建 Worker 时的环境变量**：Kubernetes 后端在创建 Worker Pod 时，若请求体未带 **`HICLAW_OSS_BUCKET`** / **`HICLAW_REGION`**，会从 **Orchestrator 进程环境**补全，避免 `mc` 使用错误的存储前缀。
+- **STS 返回的 OSS 域名**：Orchestrator 向 Worker 下发的 **`oss_endpoint` 默认为公网** `oss-<region>.aliyuncs.com`（便于 **Serverless / 非 VPC 内网** 的 Worker 拉取）。若 Worker 与 OSS **同 VPC** 且需走内网，请在 **Orchestrator** 容器环境设置 **`HICLAW_OSS_USE_INTERNAL_ENDPOINT=true`**。
+- **镜像仓库**：**`workerImage`** 与 **`copawWorkerImage`** 可指向不同仓库；若节点拉取某一仓库出现 TLS/鉴权超时，建议将两者推送到**同一可达的 ACR 实例**并在 `values.yaml` 中统一 `repository` 前缀。
 
 Chart **不**带 `Namespace` 资源，依赖 **`--create-namespace`**。
 
@@ -156,7 +163,7 @@ kubectl -n hiclaw get pods,svc
 kubectl -n hiclaw logs deployment/<同上> -f --tail=100
 ```
 
-`helm get notes` 可查看 release 说明。Manual RRSA 时可分别抽查 Manager / Orchestrator Pod 是否含 `ALIBABA_CLOUD_*`。Worker 由 Orchestrator 创建，长期异常时优先检查 `templates/backend/kubernetes.yaml` 的 RBAC、Orchestrator role、Secret 与 Worker Pod 事件。
+`helm get notes` 可查看 release 说明。Manual RRSA 时可分别抽查 Manager / Orchestrator Pod 是否含 `ALIBABA_CLOUD_*`。Worker 由 Orchestrator 创建，长期异常时优先检查 **`templates/backend/kubernetes.yaml`** 中 Orchestrator 的 **Role/RoleBinding**（`rbac.create`）、Orchestrator RAM 角色、**`HICLAW_ORCHESTRATOR_API_KEY`**、Worker Pod 事件及镜像拉取。
 
 ---
 
@@ -167,7 +174,10 @@ kubectl -n hiclaw logs deployment/<同上> -f --tail=100
 | `global.namespace` | Target namespace (metadata on resources) |
 | `global.platform` | **`ack`** \| **`acs`** — Tuwunel NAS mode |
 | `manager.rrsa.mode` (`manual` / `webhook`) | **manual**：projected OIDC token + `ALIBABA_CLOUD_*`（与 ACK 文档「手动 RRSA」一致）；**webhook**：SA `pod-identity` 注解 + 可选 `global.podIdentity.namespaceInjection` |
-| `image.*` | Manager image |
+| `image.*` | Manager 镜像 |
+| `workerImage.*` | OpenClaw Worker 镜像（`HICLAW_WORKER_IMAGE` → Orchestrator） |
+| `copawWorkerImage.*` | CoPaw Worker 镜像（`runtime: copaw` 时使用；可与 `workerImage` 使用同一 ACR 以降低拉取失败概率） |
+| `workerRuntime` | 默认 **`openclaw`** \| **`copaw`**，写入 Manager 的 **`HICLAW_DEFAULT_WORKER_RUNTIME`** |
 | `manager.env` / `manager.secret.stringData` / `manager.envFromSecret` | Runtime configuration (chart Secret vs external Secret) |
 | `manager.rrsa.*` | ACK pod identity role name |
 | `orchestrator.*` | Orchestrator image, Service, RRSA, env and Pod scheduling |
