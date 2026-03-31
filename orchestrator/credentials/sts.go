@@ -103,7 +103,12 @@ func (s *STSService) IssueWorkerToken(ctx context.Context, workerName string) (*
 		return nil, fmt.Errorf("parse STS response: %w", err)
 	}
 
-	ossEndpoint := fmt.Sprintf("oss-%s-internal.aliyuncs.com", s.config.Region)
+	// Workers (especially K8s serverless/ECI) often cannot reach oss-*-internal endpoints.
+	// Use the public endpoint unless HICLAW_OSS_USE_INTERNAL_ENDPOINT=true (same-VPC workers/SAE).
+	ossEndpoint := fmt.Sprintf("oss-%s.aliyuncs.com", s.config.Region)
+	if v := strings.TrimSpace(os.Getenv("HICLAW_OSS_USE_INTERNAL_ENDPOINT")); v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "yes") {
+		ossEndpoint = fmt.Sprintf("oss-%s-internal.aliyuncs.com", s.config.Region)
+	}
 
 	return &STSToken{
 		AccessKeyID:     stsResp.Credentials.AccessKeyId,

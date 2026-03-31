@@ -109,6 +109,7 @@ func (k *K8sBackend) Create(ctx context.Context, req CreateRequest) (*WorkerResu
 	if req.Env == nil {
 		req.Env = make(map[string]string)
 	}
+	mergeOSSRegionFromProcessEnv(req.Env)
 	req.Env["HICLAW_RUNTIME"] = "aliyun"
 	if req.WorkerAPIKey != "" {
 		req.Env["HICLAW_WORKER_API_KEY"] = req.WorkerAPIKey
@@ -310,6 +311,20 @@ func (k *K8sBackend) getCurrentPodImagePullSecrets(ctx context.Context) []corev1
 		return nil
 	}
 	return append([]corev1.LocalObjectReference(nil), pod.Spec.ImagePullSecrets...)
+}
+
+// mergeOSSRegionFromProcessEnv sets HICLAW_OSS_BUCKET and HICLAW_REGION when the client
+// omitted them; the orchestrator process should already have these from the same Secret as Manager (envFrom).
+func mergeOSSRegionFromProcessEnv(env map[string]string) {
+	if env == nil {
+		return
+	}
+	if v := strings.TrimSpace(os.Getenv("HICLAW_OSS_BUCKET")); v != "" && strings.TrimSpace(env["HICLAW_OSS_BUCKET"]) == "" {
+		env["HICLAW_OSS_BUCKET"] = v
+	}
+	if v := strings.TrimSpace(os.Getenv("HICLAW_REGION")); v != "" && strings.TrimSpace(env["HICLAW_REGION"]) == "" {
+		env["HICLAW_REGION"] = v
+	}
 }
 
 func buildK8sEnvVars(env map[string]string) []corev1.EnvVar {

@@ -24,12 +24,12 @@ image:
 imagePullSecrets: []
 
 workerImage:
-  repository: higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/hiclaw-worker
-  tag: "latest"
+  repository: registry.cn-hangzhou.aliyuncs.com/hiclaw-cloud/hiclaw-worker
+  tag: v1.0.0
 
 copawWorkerImage:
-  repository: higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/hiclaw-copaw-worker
-  tag: "latest"
+  repository: registry.cn-hangzhou.aliyuncs.com/hiclaw-cloud/hiclaw-copaw-worker
+  tag: v1.0.0
 
 workerRuntime: "openclaw"
 
@@ -83,7 +83,7 @@ orchestrator:
   image:
     repository: registry.cn-hangzhou.aliyuncs.com/hiclaw-cloud/hiclaw-orchestrator
     pullPolicy: IfNotPresent
-    tag: v1.0.2
+    tag: v1.0.4
   service:
     type: ClusterIP
     port: 2375
