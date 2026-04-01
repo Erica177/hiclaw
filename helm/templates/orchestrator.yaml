@@ -7,8 +7,6 @@
 {{- $runtime := coalesce (index $orchEnv "HICLAW_RUNTIME") (index $mgrEnv "HICLAW_RUNTIME") "aliyun" }}
 {{- $region := coalesce (index $orchEnv "HICLAW_REGION") (index $mgrEnv "HICLAW_REGION") "cn-hangzhou" }}
 {{- $gwGatewayID := coalesce (index $orchEnv "HICLAW_GW_GATEWAY_ID") (index $mgrEnv "HICLAW_GW_GATEWAY_ID") "" }}
-{{- $gwModelAPIID := coalesce (index $orchEnv "HICLAW_GW_MODEL_API_ID") (index $mgrEnv "HICLAW_GW_MODEL_API_ID") "" }}
-{{- $gwEnvID := coalesce (index $orchEnv "HICLAW_GW_ENV_ID") (index $mgrEnv "HICLAW_GW_ENV_ID") "" }}
 {{- if .Values.orchestrator.serviceAccount.create }}
 apiVersion: v1
 kind: ServiceAccount
@@ -121,21 +119,13 @@ spec:
             - name: HICLAW_GW_GATEWAY_ID
               value: {{ $gwGatewayID | quote }}
             {{- end }}
-            {{- if $gwModelAPIID }}
-            - name: HICLAW_GW_MODEL_API_ID
-              value: {{ $gwModelAPIID | quote }}
-            {{- end }}
-            {{- if $gwEnvID }}
-            - name: HICLAW_GW_ENV_ID
-              value: {{ $gwEnvID | quote }}
-            {{- end }}
             {{- if .Values.orchestrator.allowedRegistries }}
             - name: HICLAW_PROXY_ALLOWED_REGISTRIES
               value: {{ join "," .Values.orchestrator.allowedRegistries | quote }}
             {{- end }}
             {{- range $k, $v := $orchEnv }}
             {{- if $v }}
-            {{- if not (has $k (list "HICLAW_RUNTIME" "HICLAW_REGION" "HICLAW_GW_GATEWAY_ID" "HICLAW_GW_MODEL_API_ID" "HICLAW_GW_ENV_ID")) }}
+            {{- if not (has $k (list "HICLAW_RUNTIME" "HICLAW_REGION" "HICLAW_GW_GATEWAY_ID")) }}
             - name: {{ $k }}
               value: {{ $v | quote }}
             {{- end }}

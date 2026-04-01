@@ -75,6 +75,8 @@ manager:
       HICLAW_ADMIN_USER: ""
       HICLAW_ADMIN_PASSWORD: ""
       HICLAW_ORCHESTRATOR_API_KEY: ""
+      HICLAW_GW_MODEL_API_ID: ""
+      HICLAW_GW_ENV_ID: ""
   envFromSecret: ""
   podSecurityContext: {}
   securityContext: {}
@@ -112,8 +114,6 @@ orchestrator:
   timezone: "Asia/Shanghai"
   env:
     HICLAW_GW_GATEWAY_ID: ""
-    HICLAW_GW_MODEL_API_ID: ""
-    HICLAW_GW_ENV_ID: ""
     HICLAW_WORKER_BACKEND: "k8s"
   envFromSecret: ""
   podAnnotations: {}
