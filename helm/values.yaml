@@ -34,6 +34,7 @@ global:
       HICLAW_CMS_PROJECT: ""
       HICLAW_CMS_WORKSPACE: ""
       HICLAW_CMS_SERVICE_NAME: ""
+      HICLAW_PROXY_CONTAINER_PREFIX: "hiclaw-worker-"
 
 imagePullSecrets: []
 
@@ -117,11 +118,9 @@ orchestrator:
       tokenMountPath: /var/run/secrets/ack.alibabacloud.com/rrsa-tokens
       tokenFile: /var/run/secrets/ack.alibabacloud.com/rrsa-tokens/token
       expirationSeconds: 3600
-  containerPrefix: "hiclaw-worker-"
   timezone: "Asia/Shanghai"
   env:
     HICLAW_GW_GATEWAY_ID: ""
-    HICLAW_PROXY_CONTAINER_PREFIX: "hiclaw-worker-"
     HICLAW_WORKER_BACKEND: "k8s"
   envFromSecret: ""
   podAnnotations: {}

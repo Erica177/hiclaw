@@ -121,8 +121,6 @@ spec:
               {{- $copawTag = include "hiclaw.imageTagSuffix" $copawTag }}
               {{- end }}
               value: {{ printf "%s:%s" .Values.copawWorkerImage.repository $copawTag | quote }}
-            - name: HICLAW_PROXY_CONTAINER_PREFIX
-              value: {{ index (.Values.orchestrator.env | default dict) "HICLAW_PROXY_CONTAINER_PREFIX" | default .Values.orchestrator.containerPrefix | default "hiclaw-worker-" | quote }}
             - name: TZ
               value: {{ .Values.orchestrator.timezone | default "Asia/Shanghai" | quote }}
             {{- if $gwGatewayID }}
@@ -135,7 +133,7 @@ spec:
             {{- end }}
             {{- range $k, $v := $orchEnv }}
             {{- if $v }}
-            {{- if not (has $k (list "HICLAW_RUNTIME" "HICLAW_REGION" "HICLAW_GW_GATEWAY_ID" "HICLAW_PROXY_CONTAINER_PREFIX")) }}
+            {{- if not (has $k (list "HICLAW_RUNTIME" "HICLAW_REGION" "HICLAW_GW_GATEWAY_ID")) }}
             - name: {{ $k }}
               value: {{ $v | quote }}
             {{- end }}

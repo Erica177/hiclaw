@@ -15,7 +15,7 @@
 #   worker_backend_delete "alice"
 
 CONTAINER_API_BASE="${HICLAW_ORCHESTRATOR_URL:-http://localhost:2375}"
-WORKER_CONTAINER_PREFIX="hiclaw-worker-"
+WORKER_CONTAINER_PREFIX="${HICLAW_PROXY_CONTAINER_PREFIX:-hiclaw-worker-}"
 
 _log() {
     echo "[hiclaw-container $(date '+%Y-%m-%d %H:%M:%S')] $1"
