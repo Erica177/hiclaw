@@ -85,6 +85,7 @@ spec:
 | `spec.skills` | []string | No | — | Built-in skills, distributed by Manager |
 | `spec.mcpServers` | []string | No | — | Built-in MCP Servers, authorized via Higress gateway |
 | `spec.package` | string | No | — | Custom package URI: `file://`, `http(s)://`, or `nacos://` |
+| `spec.expose` | []object | No | — | Ports to expose via Higress gateway (see [Service Publishing](#service-publishing)) |
 
 ### identity / soul / agents vs package
 
@@ -222,6 +223,7 @@ spec:
 | `workers[].skills` | []string | No | Built-in skills |
 | `workers[].mcpServers` | []string | No | Built-in MCP Servers |
 | `workers[].package` | string | No | Custom package URI |
+| `workers[].expose` | []object | No | Ports to expose via Higress gateway (see [Service Publishing](#service-publishing)) |
 
 ### What Makes Team Leader Special
 
@@ -451,9 +453,9 @@ Both Workers and Team Workers support custom configuration packages via `spec.pa
 |--------|---------|-------------|
 | `file://` | `file://./alice.zip` | Local file, transferred via `docker cp` |
 | `http(s)://` | `https://example.com/worker.zip` | Remote download |
-| `nacos://` | `nacos://instance-xxx/ns/agent-spec/worker-xxx/v1` | Pulled from Nacos config center |
+| `nacos://` | `nacos://host:8848/ns/worker-xxx/v1` | Pulled from Nacos |
 
-Nacos URI format: `nacos://{instance-id}/{namespace}/{group}/{data-id}/{version}`
+Nacos URI format: `nacos://[user:pass@]host:port/{namespace}/{agentspec-name}[/{version}|/label:{label}]`
 
 ### Package Directory Structure
 
@@ -535,7 +537,8 @@ bash install/hiclaw-import.sh worker --name alice --zip ./alice.zip
 bash install/hiclaw-import.sh worker --name alice --zip https://example.com/alice.zip
 
 # Import from Nacos
-bash install/hiclaw-import.sh worker --name alice --package nacos://instance-xxx/ns/agent-spec/alice/v1
+bash install/hiclaw-import.sh worker --name alice --package nacos://host:8848/ns/alice/v1
+bash install/hiclaw-import.sh worker --name alice --package nacos://host:8848/ns/alice/label:latest
 
 # Create without a package
 bash install/hiclaw-import.sh worker --name bob --model claude-sonnet-4-6 \
@@ -701,6 +704,95 @@ Reconciler executes scripts (create-worker.sh / create-team.sh / create-human.sh
 | Human | Register Matrix account + configure permissions + send email | permissionLevel change → recalculate groupAllowFrom | Remove from all groupAllowFrom → kick from Rooms |
 
 All resources use the Kubernetes finalizer pattern to ensure cleanup before deletion.
+
+## Service Publishing
+
+Workers can expose HTTP services running inside their containers to the outside world via the Higress gateway. Add `spec.expose` to a Worker's configuration to publish container ports — the Controller automatically creates the necessary Higress domain, DNS service source, and route.
+
+### How It Works
+
+Each exposed port gets an auto-generated domain:
+
+```
+worker-{name}-{port}-local.hiclaw.io
+```
+
+For example, worker `alice` exposing port `8080` becomes accessible at `worker-alice-8080-local.hiclaw.io`.
+
+The Controller creates three Higress resources per exposed port:
+1. **Domain**: `worker-{name}-{port}-local.hiclaw.io`
+2. **DNS Service Source**: points to the worker container via network alias `{name}.local`
+3. **Route**: forwards all requests on the domain to the worker's port
+
+When the expose configuration is removed or the Worker is deleted, all associated Higress resources are automatically cleaned up.
+
+### Configuration
+
+```yaml
+apiVersion: hiclaw.io/v1beta1
+kind: Worker
+metadata:
+  name: alice
+spec:
+  model: qwen3.5-plus
+  expose:
+    - port: 8080
+    - port: 3000
+```
+
+**Expose field reference:**
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `expose[].port` | int | Yes | — | Container port to expose |
+| `expose[].protocol` | string | No | `http` | Protocol: `http` or `grpc` |
+
+### Team Workers
+
+Team Workers also support `expose`:
+
+```yaml
+apiVersion: hiclaw.io/v1beta1
+kind: Team
+metadata:
+  name: dev-team
+spec:
+  leader:
+    name: lead
+    model: qwen3.5-plus
+  workers:
+    - name: backend
+      model: qwen3.5-plus
+      expose:
+        - port: 8080
+    - name: frontend
+      model: qwen3.5-plus
+      expose:
+        - port: 3000
+```
+
+### CLI Usage
+
+```bash
+# Expose ports via CLI flag
+hiclaw apply worker --name alice --model qwen3.5-plus --expose 8080,3000
+
+# Remove exposed ports (re-apply without --expose)
+hiclaw apply worker --name alice --model qwen3.5-plus
+```
+
+### Use Cases
+
+- **Web App Preview**: A Worker develops a web application and exposes it for the Admin or other team members to preview
+- **API Service**: A Worker runs a backend API that other Workers or external systems need to access
+- **Development Server**: Expose a dev server for real-time testing during development
+
+### Notes
+
+- The worker container must be running and the service must be listening on the specified port before it can be accessed
+- Domains are auto-generated; custom domains are not yet supported
+- No authentication is configured on exposed routes (public access within the network)
+- Removing a port from `spec.expose` and re-applying will clean up the corresponding Higress resources
 
 ### Two Deployment Modes
 

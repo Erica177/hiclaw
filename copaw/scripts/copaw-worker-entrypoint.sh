@@ -63,6 +63,10 @@ mkdir -p "${WORKER_SKILLS_DIR}"
 mkdir -p "${HOME}/.agents"
 ln -sfn "${WORKER_SKILLS_DIR}" "${HOME}/.agents/skills"
 
+# Create /root/hiclaw-fs symlink so scripts using absolute paths work in CoPaw
+# (OpenClaw workers use /root/hiclaw-fs natively; CoPaw stores synced files under INSTALL_DIR)
+ln -sfn "${INSTALL_DIR}/${WORKER_NAME}" /root/hiclaw-fs 2>/dev/null || true
+
 # Background readiness reporter — report ready to orchestrator when CoPaw bridge completes
 _start_readiness_reporter() {
     [ -z "${HICLAW_ORCHESTRATOR_URL:-}" ] && return 0

@@ -12,6 +12,10 @@ debug-log/
 .kiro/
 .idea/
 
+# Claude Code IDE
+.claude/
+CLAUDE.md
+
 # OS files
 .DS_Store
 
@@ -35,6 +39,4 @@ manager/copaw-agent/
 node_modules/
 package.json
 pnpm-lock.yaml
-
-# Claude Code
-CLAUDE.md
+.cursor/
