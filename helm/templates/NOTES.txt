@@ -1,13 +1,9 @@
 ========================================================================
-{{- if (include "hiclaw.isCloudPlatform" .) }}
-HiClaw (cloud / {{ .Values.global.platform }}) — {{ .Chart.Name }} / {{ .Release.Name }}
-{{- else }}
-HiClaw (generic k8s) — {{ .Chart.Name }} / {{ .Release.Name }}
-{{- end }}
+HiClaw (cloud / {{ .Values.global.platform | default "ack" }}) — {{ .Chart.Name }} / {{ .Release.Name }}
 ========================================================================
 
 Namespace: {{ include "hiclaw.namespace" . }}
-Platform:  {{ .Values.global.platform | default "generic" }}
+Platform:  {{ .Values.global.platform | default "ack" }}
 
 1. Wait for Manager and Orchestrator:
    kubectl wait --for=condition=available deployment/{{ include "hiclaw.manager.fullname" . }} \
@@ -25,36 +21,25 @@ Platform:  {{ .Values.global.platform | default "generic" }}
    Optional port-forward:
    kubectl port-forward svc/{{ include "hiclaw.manager.fullname" . }} {{ .Values.manager.service.port }}:{{ .Values.manager.service.targetPort }} -n {{ include "hiclaw.namespace" . }}
 
-{{- if (include "hiclaw.isCloudPlatform" .) }}
-
 4. ACK RRSA — Default: manual injection (projected token + ALIBABA_CLOUD_*).
    - Manager: values manager.rrsa.manual.*
    - Orchestrator: values orchestrator.rrsa.manual.*
 {{- if eq (.Values.manager.rrsa.mode | default "manual") "webhook" }}
    Webhook mode: install ack-pod-identity-webhook; SA role-name Manager={{ .Values.manager.rrsa.roleName }}, Orchestrator={{ .Values.orchestrator.rrsa.roleName }}; enable global.podIdentity.namespaceInjection if needed.
 {{- end }}
-{{- else }}
 
-4. MinIO (object storage):
-   Service: {{ include "hiclaw.minio.fullname" . }}:{{ .Values.minio.service.apiPort }} (API) / {{ .Values.minio.service.consolePort }} (Console)
-   In-cluster URL: {{ include "hiclaw.minio.internalURL" . }}
-   Bucket: {{ .Values.minio.bucketName }}
+5. Secrets: set global.secret.stringData (chart Secret) or manager.envFromSecret (external Secret). The same secret is reused by the Orchestrator unless orchestrator.envFromSecret is set explicitly.
 
-   Optional port-forward (Console):
-   kubectl port-forward svc/{{ include "hiclaw.minio.fullname" . }} {{ .Values.minio.service.consolePort }}:{{ .Values.minio.service.consolePort }} -n {{ include "hiclaw.namespace" . }}
-{{- if .Values.higress.enabled }}
-
-5. Higress AI Gateway (sub-chart):
-   Gateway URL: {{ include "hiclaw.higress.gatewayURL" . }}
-{{- end }}
-{{- end }}
-
-6. Secrets: set global.secret.stringData (chart Secret) or manager.envFromSecret (external Secret). The same secret is reused by the Orchestrator unless orchestrator.envFromSecret is set explicitly.
-
-7. Tuwunel + Element Web (always deployed with this chart):
+6. Tuwunel + Element Web (always deployed with this chart):
    - Tuwunel: svc/{{ include "hiclaw.tuwunel.fullname" . }}:{{ .Values.tuwunel.service.port }}
      In-cluster Matrix base URL: {{ include "hiclaw.tuwunel.internalMatrixURL" . }}
    - Element Web: svc/{{ include "hiclaw.elementWeb.fullname" . }}:{{ .Values.elementWeb.service.port }}
+
+{{- if .Values.controller.enabled }}
+7. HiClaw Controller (declarative resource management):
+   Service: {{ include "hiclaw.controller.fullname" . }}:{{ .Values.controller.service.port }}
+   In-cluster URL: {{ include "hiclaw.controller.serviceURL" . }}
+{{- end }}
 
 # Logs
 kubectl logs -f deployment/{{ include "hiclaw.manager.fullname" . }} -n {{ include "hiclaw.namespace" . }}

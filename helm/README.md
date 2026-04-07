@@ -177,52 +177,8 @@ kubectl -n hiclaw logs deployment/<同上> -f --tail=100
 | `workerRuntime` | 默认 **`openclaw`** \| **`copaw`** |
 | `manager.env` / `manager.envFromSecret` | Manager 额外环境变量 |
 | `orchestrator.*` | Orchestrator image, Service, RRSA, env |
-| `minio.*` | 通用 k8s 模式下的 MinIO 配置（镜像、存储、凭据） |
-| `higress.enabled` | 通用 k8s 模式下启用 Higress AI 网关子 Chart |
+| `controller.*` | hiclaw-controller（声明式资源管理，默认关闭） |
 | `tuwunel.*` | Homeserver image, persistence |
 | `elementWeb.*` | Element Web image |
 
 详见 `values.yaml` 默认值。
-
----
-
-## 通用 Kubernetes 部署（kind / minikube / 标准 k8s）
-
-当 `global.platform` 为空或未设置时，Chart 以通用 k8s 模式部署：
-- **MinIO** 替代阿里云 OSS，由 Chart 自动部署
-- **Higress** 替代外部 APIG，通过子 Chart 依赖部署（需设置 `higress.enabled: true`）
-- **RRSA** 相关配置自动跳过
-- **Tuwunel** 使用默认 StorageClass 的 PVC（而非 NAS）
-
-### 通用 k8s 安装命令示例
-
-```bash
-# 1. 添加 Higress Helm 仓库并更新依赖
-helm repo add higress.io https://higress.io/helm-charts
-helm dependency update ./helm
-
-# 2. 安装（通用 k8s 模式，platform 默认为空）
-helm upgrade --install hiclaw ./helm \
-  --namespace hiclaw \
-  --create-namespace \
-  -f ./helm/values.yaml \
-  --set higress.enabled=true \
-  --set-string global.secret.stringData.HICLAW_MANAGER_PASSWORD='Manager Matrix 密码' \
-  --set-string global.secret.stringData.HICLAW_REGISTRATION_TOKEN='Matrix 注册 Token' \
-  --set-string global.secret.stringData.HICLAW_ADMIN_USER='管理后台用户名' \
-  --set-string global.secret.stringData.HICLAW_ADMIN_PASSWORD='管理后台密码'
-```
-
-### 通用 k8s 模式 Values 参数
-
-| Key | 说明 | 默认值 |
-|-----|------|--------|
-| `minio.image.repository` | MinIO 镜像 | `minio/minio` |
-| `minio.image.tag` | MinIO 镜像 tag | `latest` |
-| `minio.persistence.enabled` | 启用 MinIO 数据持久化 | `true` |
-| `minio.persistence.size` | MinIO PVC 大小 | `10Gi` |
-| `minio.auth.rootUser` | MinIO root 用户名 | `minioadmin` |
-| `minio.auth.rootPassword` | MinIO root 密码 | `minioadmin` |
-| `minio.bucketName` | MinIO bucket 名称 | `hiclaw` |
-| `higress.enabled` | 启用 Higress AI 网关子 Chart | `false` |
-| `higress.global.local` | Higress 本地集群模式 | `true` |

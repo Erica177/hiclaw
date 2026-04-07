@@ -139,23 +139,6 @@ spec:
             {{- end }}
             {{- end }}
             {{- end }}
-            {{- /* 通用 k8s 模式：注入 MinIO 环境变量，Orchestrator 创建 Worker 时会传递 */ -}}
-            {{- if (include "hiclaw.isGenericK8s" .) }}
-            - name: HICLAW_MINIO_ENDPOINT
-              value: {{ include "hiclaw.minio.internalURL" . | quote }}
-            - name: HICLAW_MINIO_ACCESS_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "hiclaw.minio.fullname" . }}
-                  key: MINIO_ROOT_USER
-            - name: HICLAW_MINIO_SECRET_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "hiclaw.minio.fullname" . }}
-                  key: MINIO_ROOT_PASSWORD
-            - name: HICLAW_MINIO_BUCKET
-              value: {{ .Values.minio.bucketName | quote }}
-            {{- end }}
             {{- if $rrsaManual }}
             - name: ALIBABA_CLOUD_ROLE_ARN
               value: {{ .Values.orchestrator.rrsa.manual.roleArn | quote }}

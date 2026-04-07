@@ -86,14 +86,6 @@ Platform detection: returns "true" when running on Alibaba Cloud (ACK / ACS).
 {{- if or (eq $p "ack") (eq $p "acs") -}}true{{- end -}}
 {{- end }}
 
-{{/*
-Platform detection: returns "true" when running on generic Kubernetes (kind, minikube, etc.).
-Inverse of isCloudPlatform.
-*/}}
-{{- define "hiclaw.isGenericK8s" -}}
-{{- if not (include "hiclaw.isCloudPlatform" .) -}}true{{- end -}}
-{{- end }}
-
 {{/* NAS 形态：默认 global.platform；可被 tuwunel.persistence.platform 覆盖 */}}
 {{- define "hiclaw.persistence.platform" -}}
 {{- coalesce .Values.tuwunel.persistence.platform .Values.global.platform }}
@@ -327,50 +319,6 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end -}}
 {{- end }}
 
-{{/* ── MinIO（通用 k8s 模式）──────────────────────────────────────────────── */}}
-
-{{- define "hiclaw.minio.fullname" -}}
-{{- printf "%s-minio" (include "hiclaw.fullname" .) | trunc 63 | trimSuffix "-" }}
-{{- end }}
-
-{{- define "hiclaw.minio.selectorLabels" -}}
-app.kubernetes.io/name: {{ include "hiclaw.name" . }}
-app.kubernetes.io/instance: {{ .Release.Name }}
-app.kubernetes.io/component: minio
-{{- end }}
-
-{{- define "hiclaw.minio.labels" -}}
-helm.sh/chart: {{ include "hiclaw.chart" . }}
-{{ include "hiclaw.minio.selectorLabels" . }}
-{{- if .Chart.AppVersion }}
-app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
-{{- end }}
-app.kubernetes.io/managed-by: {{ .Release.Service }}
-{{- end }}
-
-{{- define "hiclaw.minio.internalURL" -}}
-{{- printf "http://%s.%s.svc.cluster.local:%d" (include "hiclaw.minio.fullname" .) (include "hiclaw.namespace" .) (.Values.minio.service.apiPort | int) }}
-{{- end }}
-
-{{- define "hiclaw.minio.image" -}}
-{{- printf "%s:%s" .Values.minio.image.repository .Values.minio.image.tag }}
-{{- end }}
-
-{{/* ── Higress（通用 k8s 模式，子 Chart）──────────────────────────────────── */}}
-
-{{/*
-Higress Gateway 集群内部 URL。
-子 Chart 的 gateway service 名称默认为 higress-gateway（在子 Chart 的命名空间内）。
-*/}}
-{{- define "hiclaw.higress.gatewayURL" -}}
-{{- $port := 80 }}
-{{- if and .Values.higress (index .Values.higress "higress-core") }}
-{{- $gw := index (index .Values.higress "higress-core") "gateway" | default dict }}
-{{- $port = $gw.httpPort | default 80 }}
-{{- end }}
-{{- printf "http://higress-gateway.%s.svc.cluster.local:%d" (include "hiclaw.namespace" .) ($port | int) }}
-{{- end }}
-
 {{/* RRSA: ack-pod-identity-webhook (SA annotation + optional namespace injection) */}}
 {{- define "hiclaw.manager.rrsaWebhook" -}}
 {{- if and .Values.manager.rrsa.enabled (eq (.Values.manager.rrsa.mode | default "manual") "webhook") .Values.manager.rrsa.roleName -}}true{{- end -}}
@@ -387,4 +335,54 @@ Higress Gateway 集群内部 URL。
 
 {{- define "hiclaw.orchestrator.rrsaManual" -}}
 {{- if and .Values.orchestrator.rrsa.enabled (eq (.Values.orchestrator.rrsa.mode | default "manual") "manual") .Values.orchestrator.rrsa.manual.roleArn (include "hiclaw.rrsa.oidcProviderArn" .) -}}true{{- end -}}
+{{- end }}
+
+{{/* ── hiclaw-controller ──────────────────────────────────────────────────── */}}
+
+{{- define "hiclaw.controller.fullname" -}}
+{{- if .Values.controller.deploymentName }}
+{{- .Values.controller.deploymentName | trunc 63 | trimSuffix "-" }}
+{{- else }}
+{{- printf "%s-controller" (include "hiclaw.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+{{- end }}
+
+{{- define "hiclaw.controller.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "hiclaw.name" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: controller
+{{- end }}
+
+{{- define "hiclaw.controller.labels" -}}
+helm.sh/chart: {{ include "hiclaw.chart" . }}
+{{ include "hiclaw.controller.selectorLabels" . }}
+{{- if .Chart.AppVersion }}
+app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+{{- end }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end }}
+
+{{- define "hiclaw.controller.serviceAccountName" -}}
+{{- if .Values.controller.serviceAccount.create }}
+{{- default (printf "%s-controller" (include "hiclaw.fullname" .)) .Values.controller.serviceAccount.name }}
+{{- else }}
+{{- default "default" .Values.controller.serviceAccount.name }}
+{{- end }}
+{{- end }}
+
+{{- define "hiclaw.controller.imageTag" -}}
+{{- $tag := default .Chart.AppVersion .Values.controller.image.tag }}
+{{- if (include "hiclaw.isCloudPlatform" .) }}
+{{- include "hiclaw.imageTagSuffix" $tag }}
+{{- else }}
+{{- $tag }}
+{{- end }}
+{{- end }}
+
+{{- define "hiclaw.controller.image" -}}
+{{- printf "%s:%s" .Values.controller.image.repository (include "hiclaw.controller.imageTag" .) }}
+{{- end }}
+
+{{- define "hiclaw.controller.serviceURL" -}}
+{{- printf "http://%s.%s.svc.cluster.local:%d" (include "hiclaw.controller.fullname" .) (include "hiclaw.namespace" .) (.Values.controller.service.port | int) }}
 {{- end }}

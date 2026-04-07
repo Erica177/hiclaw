@@ -1,0 +1,52 @@
+{{- if .Values.controller.enabled }}
+{{- if .Values.controller.serviceAccount.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "hiclaw.controller.serviceAccountName" . }}
+  namespace: {{ include "hiclaw.namespace" . }}
+  labels:
+    {{- include "hiclaw.controller.labels" . | nindent 4 }}
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "hiclaw.controller.fullname" . }}
+  labels:
+    {{- include "hiclaw.controller.labels" . | nindent 4 }}
+rules:
+  # CRD resources: workers, teams, humans
+  - apiGroups: ["hiclaw.io"]
+    resources: ["workers", "teams", "humans"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["hiclaw.io"]
+    resources: ["workers/status", "teams/status", "humans/status"]
+    verbs: ["get", "update", "patch"]
+  # Events for recording reconciliation results
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  # ConfigMaps for leader election
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  {{- with .Values.controller.rbac.additionalRules }}
+  {{- toYaml . | nindent 2 }}
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "hiclaw.controller.fullname" . }}
+  labels:
+    {{- include "hiclaw.controller.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "hiclaw.controller.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "hiclaw.controller.serviceAccountName" . }}
+    namespace: {{ include "hiclaw.namespace" . }}
+{{- end }}

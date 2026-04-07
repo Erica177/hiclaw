@@ -12,7 +12,7 @@
 
 global:
   namespace: hiclaw
-  platform: ""
+  platform: "acs"
   rrsa:
     oidcProviderArn: ""
   secret:
@@ -40,11 +40,11 @@ imagePullSecrets: []
 
 workerImage:
   repository: higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/hiclaw-worker
-  tag: v1.0.9-rc-k8s
+  tag: v1.0.9-k8s_containerd_accelerated
 
 copawWorkerImage:
   repository: higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/hiclaw-copaw-worker
-  tag: v1.0.9-rc-k8s
+  tag: latest_containerd_accelerated
 
 workerRuntime: "openclaw"
 
@@ -53,7 +53,7 @@ manager:
   image:
     repository: higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/hiclaw-manager-aliyun
     pullPolicy: Always
-    tag: v1.0.9-rc-k8s
+    tag: v1.0.9-k8s_containerd_accelerated
   healthCheck:
     enabled: true
     type: "tcp"                 # "tcp" or "http"
@@ -93,7 +93,7 @@ orchestrator:
   image:
     repository: higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/hiclaw-orchestrator
     pullPolicy: IfNotPresent
-    tag: v1.0.0-rc-k8s
+    tag: v1.0.9-k8s_containerd_accelerated
   service:
     type: ClusterIP
     port: 2375
@@ -132,6 +132,40 @@ orchestrator:
   allowedRegistries: []
 
 replicaCount: 1
+
+# ── hiclaw-controller（声明式资源管理，K8s CRD 模式）──────────────────────
+controller:
+  enabled: false
+  deploymentName: ""
+  image:
+    repository: higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/hiclaw-controller
+    pullPolicy: IfNotPresent
+    tag: latest_containerd_accelerated
+  service:
+    type: ClusterIP
+    port: 8090
+    targetPort: 8090
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  serviceAccount:
+    create: true
+    name: ""
+  crds:
+    install: true
+  rbac:
+    additionalRules: []
+  env: {}
+  podAnnotations: {}
+  podSecurityContext: {}
+  securityContext: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
 
 podAnnotations: {}
 podLabels: {}
@@ -241,44 +275,3 @@ elementWeb:
 
 nameOverride: ""
 fullnameOverride: ""
-
-# ── MinIO（仅通用 k8s 模式，global.platform 为空时部署）──────────────────────
-minio:
-  image:
-    repository: minio/minio
-    tag: latest
-    pullPolicy: IfNotPresent
-  resources:
-    requests:
-      cpu: 250m
-      memory: 512Mi
-    limits:
-      cpu: 500m
-      memory: 1Gi
-  service:
-    type: ClusterIP
-    apiPort: 9000
-    consolePort: 9001
-  persistence:
-    enabled: true
-    size: 10Gi
-    storageClassName: ""
-  auth:
-    rootUser: "minioadmin"
-    rootPassword: "minioadmin"
-  bucketName: "hiclaw"
-
-# ── Higress AI 网关（仅通用 k8s 模式，需设置 higress.enabled: true）────────
-# Higress 通过 Helm 子 Chart 依赖部署。通用 k8s 模式下启用，阿里云模式下使用外部 APIG。
-# 完整参数参考：https://higress.io/en/docs/latest/user/configurations/
-higress:
-  enabled: false
-  global:
-    local: true          # kind / minikube 等本地集群设为 true
-  higress-core:
-    gateway:
-      replicas: 1
-      httpPort: 80
-      httpsPort: 443
-    controller:
-      replicas: 1
