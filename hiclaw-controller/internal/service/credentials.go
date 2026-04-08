@@ -1,4 +1,4 @@
-package controller
+package service
 
 import (
 	"bufio"
@@ -123,7 +123,6 @@ func GenerateCredentials() (*WorkerCredentials, error) {
 	}, nil
 }
 
-// generateRandomHex returns n random bytes encoded as 2*n hex characters.
 func generateRandomHex(n int) (string, error) {
 	b := make([]byte, n)
 	if _, err := rand.Read(b); err != nil {

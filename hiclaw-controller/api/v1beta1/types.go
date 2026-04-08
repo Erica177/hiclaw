@@ -51,13 +51,14 @@ type ChannelPolicySpec struct {
 }
 
 type WorkerStatus struct {
-	Phase          string              `json:"phase,omitempty"` // Pending/Running/Stopped/Failed
-	MatrixUserID   string              `json:"matrixUserID,omitempty"`
-	RoomID         string              `json:"roomID,omitempty"`
-	ContainerState string              `json:"containerState,omitempty"`
-	LastHeartbeat  string              `json:"lastHeartbeat,omitempty"`
-	Message        string              `json:"message,omitempty"`
-	ExposedPorts   []ExposedPortStatus `json:"exposedPorts,omitempty"`
+	ObservedGeneration int64               `json:"observedGeneration,omitempty"`
+	Phase              string              `json:"phase,omitempty"` // Pending/Running/Stopped/Failed
+	MatrixUserID       string              `json:"matrixUserID,omitempty"`
+	RoomID             string              `json:"roomID,omitempty"`
+	ContainerState     string              `json:"containerState,omitempty"`
+	LastHeartbeat      string              `json:"lastHeartbeat,omitempty"`
+	Message            string              `json:"message,omitempty"`
+	ExposedPorts       []ExposedPortStatus `json:"exposedPorts,omitempty"`
 }
 
 // ExposedPortStatus records a port that has been exposed via Higress.

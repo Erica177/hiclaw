@@ -1,4 +1,4 @@
-package controller
+package service
 
 import (
 	"context"
@@ -8,23 +8,22 @@ import (
 	"github.com/hiclaw/hiclaw-controller/internal/gateway"
 )
 
+// --- Port Exposure ---
+
 // domainForExpose generates the auto domain name for a worker's exposed port.
 func domainForExpose(workerName string, port int) string {
 	return fmt.Sprintf("worker-%s-%d-local.hiclaw.io", workerName, port)
 }
 
-// containerDNSName returns the FQDN for a worker container that Higress can resolve.
-// Worker containers are created with a network alias "{name}.local" on hiclaw-net,
-// so Higress can resolve this as a DNS service source domain.
-func containerDNSName(workerName string) string {
+// ContainerDNSName returns the FQDN for a worker container that Higress can resolve.
+func ContainerDNSName(workerName string) string {
 	return fmt.Sprintf("%s.local", workerName)
 }
 
 // ReconcileExpose compares desired expose ports with current status, creates new
 // gateway resources for added ports, and removes resources for deleted ports.
-// Returns the new ExposedPortStatus list.
-func ReconcileExpose(ctx context.Context, gw gateway.Client, workerName string, desired []v1beta1.ExposePort, current []v1beta1.ExposedPortStatus) ([]v1beta1.ExposedPortStatus, error) {
-	if gw == nil {
+func (p *Provisioner) ReconcileExpose(ctx context.Context, workerName string, desired []v1beta1.ExposePort, current []v1beta1.ExposedPortStatus) ([]v1beta1.ExposedPortStatus, error) {
+	if p.gateway == nil {
 		return current, nil
 	}
 
@@ -47,9 +46,9 @@ func ReconcileExpose(ctx context.Context, gw gateway.Client, workerName string, 
 		}
 
 		domain := domainForExpose(workerName, ep.Port)
-		err := gw.ExposePort(ctx, gateway.PortExposeRequest{
+		err := p.gateway.ExposePort(ctx, gateway.PortExposeRequest{
 			WorkerName:  workerName,
-			ServiceHost: containerDNSName(workerName),
+			ServiceHost: ContainerDNSName(workerName),
 			Port:        ep.Port,
 			Domain:      domain,
 		})
@@ -71,7 +70,7 @@ func ReconcileExpose(ctx context.Context, gw gateway.Client, workerName string, 
 			continue
 		}
 
-		err := gw.UnexposePort(ctx, gateway.PortExposeRequest{
+		err := p.gateway.UnexposePort(ctx, gateway.PortExposeRequest{
 			WorkerName: workerName,
 			Port:       ep.Port,
 			Domain:     ep.Domain,

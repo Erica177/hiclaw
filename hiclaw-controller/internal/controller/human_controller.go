@@ -6,8 +6,8 @@ import (
 	"time"
 
 	v1beta1 "github.com/hiclaw/hiclaw-controller/api/v1beta1"
-	"github.com/hiclaw/hiclaw-controller/internal/executor"
 	"github.com/hiclaw/hiclaw-controller/internal/matrix"
+	"github.com/hiclaw/hiclaw-controller/internal/service"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -15,15 +15,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
-// HumanReconciler reconciles Human resources using pure Go service clients.
+// HumanReconciler reconciles Human resources using Service-layer orchestration.
 type HumanReconciler struct {
 	client.Client
 
-	Matrix       matrix.Client
-	MatrixDomain string
-
-	// Legacy support
-	Executor *executor.Shell
+	Matrix matrix.Client
+	Legacy *service.LegacyCompat // nil in incluster mode
 }
 
 func (r *HumanReconciler) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
@@ -72,7 +69,6 @@ func (r *HumanReconciler) handleCreate(ctx context.Context, h *v1beta1.Human) (r
 		return reconcile.Result{}, err
 	}
 
-	// Register Matrix account for the human
 	userCreds, err := r.Matrix.EnsureUser(ctx, matrix.EnsureUserRequest{
 		Username: h.Name,
 	})
@@ -85,7 +81,6 @@ func (r *HumanReconciler) handleCreate(ctx context.Context, h *v1beta1.Human) (r
 
 	matrixUserID := r.Matrix.UserID(h.Name)
 
-	// Auto-join human to accessible worker rooms
 	var joinedRooms []string
 	for _, workerName := range h.Spec.AccessibleWorkers {
 		var worker v1beta1.Worker
@@ -102,7 +97,6 @@ func (r *HumanReconciler) handleCreate(ctx context.Context, h *v1beta1.Human) (r
 		}
 	}
 
-	// Auto-join human to team rooms
 	for _, teamName := range h.Spec.AccessibleTeams {
 		var team v1beta1.Team
 		if err := r.Get(ctx, client.ObjectKey{Name: teamName, Namespace: h.Namespace}, &team); err != nil {
@@ -141,13 +135,8 @@ func (r *HumanReconciler) handleDelete(ctx context.Context, h *v1beta1.Human) er
 	logger := log.FromContext(ctx)
 	logger.Info("deleting human", "name", h.Name)
 
-	// Remove from humans-registry (legacy, embedded mode)
-	if r.Executor != nil {
-		_, err := r.Executor.RunSimple(ctx,
-			"/opt/hiclaw/agent/skills/human-management/scripts/manage-humans-registry.sh",
-			"--action", "remove", "--name", h.Name,
-		)
-		if err != nil {
+	if r.Legacy != nil {
+		if err := r.Legacy.RemoveHumanFromRegistry(ctx, h.Name); err != nil {
 			logger.Error(err, "failed to remove human from registry (non-fatal)")
 		}
 	}

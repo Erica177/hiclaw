@@ -6,12 +6,8 @@ import (
 	"time"
 
 	v1beta1 "github.com/hiclaw/hiclaw-controller/api/v1beta1"
-	"github.com/hiclaw/hiclaw-controller/internal/agentconfig"
-	"github.com/hiclaw/hiclaw-controller/internal/backend"
 	"github.com/hiclaw/hiclaw-controller/internal/executor"
-	"github.com/hiclaw/hiclaw-controller/internal/gateway"
-	"github.com/hiclaw/hiclaw-controller/internal/matrix"
-	"github.com/hiclaw/hiclaw-controller/internal/oss"
+	"github.com/hiclaw/hiclaw-controller/internal/service"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -20,29 +16,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
-// TeamReconciler reconciles Team resources using pure Go service clients.
+// TeamReconciler reconciles Team resources using Service-layer orchestration.
 type TeamReconciler struct {
 	client.Client
 
-	Matrix      matrix.Client
-	Gateway     gateway.Client
-	OSS         oss.StorageClient
-	OSSAdmin    oss.StorageAdminClient
-	AgentConfig *agentconfig.Generator
-	Backend     *backend.Registry
-	Creds       CredentialStore
+	Provisioner *service.Provisioner
+	Deployer    *service.Deployer
+	Legacy      *service.LegacyCompat // nil in incluster mode
 
-	Executor *executor.Shell
-	Packages *executor.PackageResolver
-
-	KubeMode          string
-	ManagerConfigPath string
-	AgentFSDir        string
-	WorkerAgentDir    string
-	RegistryPath      string
-	StoragePrefix     string
-	MatrixDomain      string
-	AdminUser         string
+	AgentFSDir string // for writing inline configs to local FS
 }
 
 func (r *TeamReconciler) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
@@ -92,53 +74,26 @@ func (r *TeamReconciler) handleCreate(ctx context.Context, t *v1beta1.Team) (rec
 		return reconcile.Result{}, err
 	}
 
-	managerMatrixID := r.Matrix.UserID("manager")
-	adminMatrixID := r.Matrix.UserID(r.AdminUser)
-	leaderMatrixID := r.Matrix.UserID(t.Spec.Leader.Name)
-
-	// --- Step 1: Create Team Room (Leader + Admin + all Workers) ---
-	logger.Info("creating team room", "team", t.Name)
-	teamInvites := []string{adminMatrixID, leaderMatrixID}
+	workerNames := make([]string, 0, len(t.Spec.Workers))
 	for _, w := range t.Spec.Workers {
-		teamInvites = append(teamInvites, r.Matrix.UserID(w.Name))
-	}
-	teamPowerLevels := map[string]int{
-		managerMatrixID: 100,
-		adminMatrixID:   100,
-		leaderMatrixID:  100,
+		workerNames = append(workerNames, w.Name)
 	}
 
-	teamRoom, err := r.Matrix.CreateRoom(ctx, matrix.CreateRoomRequest{
-		Name:           fmt.Sprintf("Team: %s", t.Name),
-		Topic:          fmt.Sprintf("Team room for %s", t.Name),
-		Invite:         teamInvites,
-		PowerLevels:    teamPowerLevels,
+	// --- Step 1: Create Team Room + Leader DM Room ---
+	rooms, err := r.Provisioner.ProvisionTeamRooms(ctx, service.TeamRoomRequest{
+		TeamName:       t.Name,
+		LeaderName:     t.Spec.Leader.Name,
+		WorkerNames:    workerNames,
+		AdminSpec:      t.Spec.Admin,
 		ExistingRoomID: t.Status.TeamRoomID,
 	})
 	if err != nil {
-		return r.failTeam(ctx, t, fmt.Sprintf("team room creation failed: %v", err))
+		return r.failTeam(ctx, t, err.Error())
 	}
-	t.Status.TeamRoomID = teamRoom.RoomID
-	logger.Info("team room ready", "roomID", teamRoom.RoomID)
+	t.Status.TeamRoomID = rooms.TeamRoomID
+	t.Status.LeaderDMRoomID = rooms.LeaderDMRoomID
 
-	// --- Step 2: Create Leader DM Room (Leader + Admin, optionally Team Admin) ---
-	leaderDMInvites := []string{adminMatrixID, leaderMatrixID}
-	if t.Spec.Admin != nil && t.Spec.Admin.MatrixUserID != "" {
-		leaderDMInvites = append(leaderDMInvites, t.Spec.Admin.MatrixUserID)
-	}
-	leaderDMRoom, err := r.Matrix.CreateRoom(ctx, matrix.CreateRoomRequest{
-		Name:        fmt.Sprintf("Leader DM: %s", t.Spec.Leader.Name),
-		Topic:       fmt.Sprintf("DM channel for team leader %s", t.Spec.Leader.Name),
-		Invite:      leaderDMInvites,
-		PowerLevels: teamPowerLevels,
-	})
-	if err != nil {
-		return r.failTeam(ctx, t, fmt.Sprintf("leader DM room creation failed: %v", err))
-	}
-	logger.Info("leader DM room ready", "roomID", leaderDMRoom.RoomID)
-	t.Status.LeaderDMRoomID = leaderDMRoom.RoomID
-
-	// --- Step 3: Write inline configs for leader + workers ---
+	// --- Step 2: Write inline configs for leader + workers ---
 	if t.Spec.Leader.Identity != "" || t.Spec.Leader.Soul != "" || t.Spec.Leader.Agents != "" {
 		agentDir := fmt.Sprintf("%s/%s", r.AgentFSDir, t.Spec.Leader.Name)
 		if err := executor.WriteInlineConfigs(agentDir, "", t.Spec.Leader.Identity, t.Spec.Leader.Soul, t.Spec.Leader.Agents); err != nil {
@@ -154,14 +109,13 @@ func (r *TeamReconciler) handleCreate(ctx context.Context, t *v1beta1.Team) (rec
 		}
 	}
 
-	// --- Step 4: Create Worker CRs (leader + workers) ---
+	// --- Step 3: Create Worker CRs (leader + workers) ---
 	leaderCR := r.buildLeaderCR(t)
 	if err := r.createOrUpdateWorkerCR(ctx, leaderCR); err != nil {
 		return r.failTeam(ctx, t, fmt.Sprintf("create leader Worker CR failed: %v", err))
 	}
 	logger.Info("leader Worker CR created", "name", t.Spec.Leader.Name)
 
-	// Worker CRs with worker role
 	for _, w := range t.Spec.Workers {
 		workerCR := r.buildWorkerCR(t, w, "worker", t.Spec.Leader.Name, t.Name)
 		if err := r.createOrUpdateWorkerCR(ctx, workerCR); err != nil {
@@ -171,37 +125,28 @@ func (r *TeamReconciler) handleCreate(ctx context.Context, t *v1beta1.Team) (rec
 		}
 	}
 
-	// --- Step 4.5: Inject coordination context for leader ---
-	leaderAgentPrefix := fmt.Sprintf("agents/%s", t.Spec.Leader.Name)
-	teamWorkers := make([]agentconfig.TeamWorkerInfo, 0, len(t.Spec.Workers))
-	for _, w := range t.Spec.Workers {
-		teamWorkers = append(teamWorkers, agentconfig.TeamWorkerInfo{
-			Name: w.Name,
-		})
-	}
-	coordCtx := agentconfig.CoordinationContext{
-		WorkerName:     t.Spec.Leader.Name,
-		Role:           "team_leader",
-		MatrixDomain:   r.MatrixDomain,
-		TeamName:       t.Name,
-		TeamRoomID:     teamRoom.RoomID,
-		LeaderDMRoomID: leaderDMRoom.RoomID,
-		TeamWorkers:    teamWorkers,
-	}
+	// --- Step 4: Inject coordination context for leader ---
+	var teamAdminID string
 	if t.Spec.Admin != nil {
-		coordCtx.TeamAdminID = t.Spec.Admin.MatrixUserID
+		teamAdminID = t.Spec.Admin.MatrixUserID
 	}
-	existing, _ := r.OSS.GetObject(ctx, leaderAgentPrefix+"/AGENTS.md")
-	injected := agentconfig.InjectCoordinationContext(string(existing), coordCtx)
-	if err := r.OSS.PutObject(ctx, leaderAgentPrefix+"/AGENTS.md", []byte(injected)); err != nil {
+	if err := r.Deployer.InjectCoordinationContext(ctx, service.CoordinationDeployRequest{
+		LeaderName:     t.Spec.Leader.Name,
+		Role:           "team_leader",
+		TeamName:       t.Name,
+		TeamRoomID:     rooms.TeamRoomID,
+		LeaderDMRoomID: rooms.LeaderDMRoomID,
+		TeamWorkers:    workerNames,
+		TeamAdminID:    teamAdminID,
+	}); err != nil {
 		logger.Error(err, "leader coordination context injection failed (non-fatal)")
 	}
 
-	// --- Expose ports for team workers ---
+	// --- Step 5: Expose ports for team workers ---
 	workerExposed := make(map[string][]v1beta1.ExposedPortStatus)
 	for _, w := range t.Spec.Workers {
 		if len(w.Expose) > 0 {
-			exposed, exposeErr := ReconcileExpose(ctx, r.Gateway, w.Name, w.Expose, nil)
+			exposed, exposeErr := r.Provisioner.ReconcileExpose(ctx, w.Name, w.Expose, nil)
 			if exposeErr != nil {
 				logger.Error(exposeErr, "failed to expose ports for team worker (non-fatal)", "worker", w.Name)
 			}
@@ -215,8 +160,8 @@ func (r *TeamReconciler) handleCreate(ctx context.Context, t *v1beta1.Team) (rec
 	t.Status.Phase = "Active"
 	t.Status.LeaderReady = true
 	t.Status.ReadyWorkers = len(t.Spec.Workers)
-	t.Status.TeamRoomID = teamRoom.RoomID
-	t.Status.LeaderDMRoomID = leaderDMRoom.RoomID
+	t.Status.TeamRoomID = rooms.TeamRoomID
+	t.Status.LeaderDMRoomID = rooms.LeaderDMRoomID
 	t.Status.Message = ""
 	if len(workerExposed) > 0 {
 		t.Status.WorkerExposedPorts = workerExposed
@@ -225,7 +170,7 @@ func (r *TeamReconciler) handleCreate(ctx context.Context, t *v1beta1.Team) (rec
 		logger.Error(err, "failed to update team status (non-fatal)")
 	}
 
-	logger.Info("team created", "name", t.Name, "teamRoomID", teamRoom.RoomID)
+	logger.Info("team created", "name", t.Name, "teamRoomID", rooms.TeamRoomID)
 	return reconcile.Result{}, nil
 }
 
@@ -248,12 +193,12 @@ func (r *TeamReconciler) handleDelete(ctx context.Context, t *v1beta1.Team) erro
 			for _, ep := range w.Expose {
 				currentExposed = append(currentExposed, v1beta1.ExposedPortStatus{
 					Port:   ep.Port,
-					Domain: domainForExpose(w.Name, ep.Port),
+					Domain: service.ContainerDNSName(w.Name),
 				})
 			}
 		}
 		if len(currentExposed) > 0 {
-			if _, err := ReconcileExpose(ctx, r.Gateway, w.Name, nil, currentExposed); err != nil {
+			if _, err := r.Provisioner.ReconcileExpose(ctx, w.Name, nil, currentExposed); err != nil {
 				logger.Error(err, "failed to clean up exposed ports for team worker (non-fatal)", "worker", w.Name)
 			}
 		}
@@ -276,13 +221,9 @@ func (r *TeamReconciler) handleDelete(ctx context.Context, t *v1beta1.Team) erro
 		logger.Error(err, "failed to delete team leader CR (may not exist)", "leader", t.Spec.Leader.Name)
 	}
 
-	// Clean up teams-registry (legacy, embedded mode)
-	if r.Executor != nil {
-		_, err := r.Executor.RunSimple(ctx,
-			"/opt/hiclaw/agent/skills/team-management/scripts/manage-teams-registry.sh",
-			"--action", "remove", "--team-name", t.Name,
-		)
-		if err != nil {
+	// Legacy: remove team from teams-registry
+	if r.Legacy != nil {
+		if err := r.Legacy.RemoveTeamFromRegistry(ctx, t.Name); err != nil {
 			logger.Error(err, "failed to remove team from registry (non-fatal)")
 		}
 	}

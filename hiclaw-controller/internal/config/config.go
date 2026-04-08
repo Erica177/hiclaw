@@ -30,9 +30,9 @@ type Config struct {
 	AuthAudience string // SA token audience for TokenReview
 
 	// Higress
-	HigressBaseURL      string
-	HigressCookieFile   string
-	HigressAdminUser    string
+	HigressBaseURL       string
+	HigressCookieFile    string
+	HigressAdminUser     string
 	HigressAdminPassword string
 
 	// Worker backend selection
@@ -93,6 +93,22 @@ type Config struct {
 	CMSLicenseKey     string
 	CMSProject        string
 	CMSWorkspace      string
+
+	// Pre-resolved worker environment defaults (passed to worker containers)
+	WorkerEnv WorkerEnvDefaults
+}
+
+// WorkerEnvDefaults holds environment variable defaults injected into worker containers.
+// All values are resolved once at config load time from the controller's own environment.
+type WorkerEnvDefaults struct {
+	MatrixDomain  string
+	FSEndpoint    string
+	MinIOEndpoint string
+	MinIOBucket   string
+	StoragePrefix string
+	ControllerURL string
+	AIGatewayURL  string
+	MatrixURL     string
 }
 
 func LoadConfig() *Config {
@@ -116,9 +132,9 @@ func LoadConfig() *Config {
 
 		AuthAudience: envOrDefault("HICLAW_AUTH_AUDIENCE", "hiclaw-controller"),
 
-		HigressBaseURL:      envOrDefault("HIGRESS_BASE_URL", "http://127.0.0.1:8001"),
-		HigressCookieFile:   os.Getenv("HIGRESS_COOKIE_FILE"),
-		HigressAdminUser:    envOrDefault("HICLAW_HIGRESS_ADMIN_USER", "admin"),
+		HigressBaseURL:       envOrDefault("HIGRESS_BASE_URL", "http://127.0.0.1:8001"),
+		HigressCookieFile:    os.Getenv("HIGRESS_COOKIE_FILE"),
+		HigressAdminUser:     envOrDefault("HICLAW_HIGRESS_ADMIN_USER", "admin"),
 		HigressAdminPassword: envOrDefault("HICLAW_HIGRESS_ADMIN_PASSWORD", "admin"),
 
 		WorkerBackend: firstNonEmpty(
@@ -175,7 +191,56 @@ func LoadConfig() *Config {
 		CMSLicenseKey:     os.Getenv("HICLAW_CMS_LICENSE_KEY"),
 		CMSProject:        os.Getenv("HICLAW_CMS_PROJECT"),
 		CMSWorkspace:      os.Getenv("HICLAW_CMS_WORKSPACE"),
+
+		WorkerEnv: WorkerEnvDefaults{
+			MatrixDomain:  envOrDefault("HICLAW_MATRIX_DOMAIN", "matrix-local.hiclaw.io:8080"),
+			FSEndpoint:    firstNonEmpty(os.Getenv("HICLAW_FS_ENDPOINT"), os.Getenv("HICLAW_MINIO_ENDPOINT")),
+			MinIOEndpoint: os.Getenv("HICLAW_MINIO_ENDPOINT"),
+			MinIOBucket:   os.Getenv("HICLAW_MINIO_BUCKET"),
+			StoragePrefix: envOrDefault("HICLAW_STORAGE_PREFIX", "hiclaw/hiclaw"),
+			ControllerURL: firstNonEmpty(os.Getenv("HICLAW_CONTROLLER_URL"), os.Getenv("HICLAW_ORCHESTRATOR_URL")),
+			AIGatewayURL:  envOrDefault("HICLAW_AI_GATEWAY_URL", "http://aigw-local.hiclaw.io:8080"),
+			MatrixURL:     envOrDefault("HICLAW_MATRIX_URL", "http://matrix-local.hiclaw.io:8080"),
+		},
 	}
+}
+
+// Namespace returns the effective K8s namespace, defaulting to "default".
+func (c *Config) Namespace() string {
+	if c.K8sNamespace != "" {
+		return c.K8sNamespace
+	}
+	return "default"
+}
+
+// HasMinIOAdmin reports whether the local MinIO admin API is available.
+func (c *Config) HasMinIOAdmin() bool {
+	return c.WorkerEnv.MinIOEndpoint != ""
+}
+
+// CredsDir returns the directory for persisted worker credentials (embedded mode).
+func (c *Config) CredsDir() string {
+	return envOrDefault("HICLAW_CREDS_DIR", "/data/worker-creds")
+}
+
+// AgentFSDir returns the local filesystem root for agent workspaces.
+func (c *Config) AgentFSDir() string {
+	return envOrDefault("HICLAW_AGENT_FS_DIR", "/root/hiclaw-fs/agents")
+}
+
+// WorkerAgentDir returns the source directory for builtin worker agent files.
+func (c *Config) WorkerAgentDir() string {
+	return envOrDefault("HICLAW_WORKER_AGENT_DIR", "/opt/hiclaw/agent/worker-agent")
+}
+
+// ManagerConfigPath returns the path to the Manager Agent's openclaw.json (embedded mode).
+func (c *Config) ManagerConfigPath() string {
+	return envOrDefault("HICLAW_MANAGER_CONFIG_PATH", "/root/openclaw.json")
+}
+
+// RegistryPath returns the path to the workers-registry.json (embedded mode).
+func (c *Config) RegistryPath() string {
+	return envOrDefault("HICLAW_REGISTRY_PATH", "/root/workers-registry.json")
 }
 
 func (c *Config) DockerConfig() backend.DockerConfig {
