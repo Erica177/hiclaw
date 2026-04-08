@@ -3,11 +3,11 @@ package controller
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	v1beta1 "github.com/hiclaw/hiclaw-controller/api/v1beta1"
 	"github.com/hiclaw/hiclaw-controller/internal/executor"
+	"github.com/hiclaw/hiclaw-controller/internal/matrix"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -15,9 +15,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
-// HumanReconciler reconciles Human resources.
+// HumanReconciler reconciles Human resources using pure Go service clients.
 type HumanReconciler struct {
 	client.Client
+
+	Matrix       matrix.Client
+	MatrixDomain string
+
+	// Legacy support
 	Executor *executor.Shell
 }
 
@@ -29,7 +34,6 @@ func (r *HumanReconciler) Reconcile(ctx context.Context, req reconcile.Request) 
 		return reconcile.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// Handle deletion
 	if !human.DeletionTimestamp.IsZero() {
 		if controllerutil.ContainsFinalizer(&human, finalizerName) {
 			if err := r.handleDelete(ctx, &human); err != nil {
@@ -44,7 +48,6 @@ func (r *HumanReconciler) Reconcile(ctx context.Context, req reconcile.Request) 
 		return reconcile.Result{}, nil
 	}
 
-	// Add finalizer
 	if !controllerutil.ContainsFinalizer(&human, finalizerName) {
 		controllerutil.AddFinalizer(&human, finalizerName)
 		if err := r.Update(ctx, &human); err != nil {
@@ -53,9 +56,7 @@ func (r *HumanReconciler) Reconcile(ctx context.Context, req reconcile.Request) 
 	}
 
 	switch human.Status.Phase {
-	case "":
-		return r.handleCreate(ctx, &human)
-	case "Failed":
+	case "", "Failed":
 		return r.handleCreate(ctx, &human)
 	default:
 		return r.handleUpdate(ctx, &human)
@@ -71,66 +72,63 @@ func (r *HumanReconciler) handleCreate(ctx context.Context, h *v1beta1.Human) (r
 		return reconcile.Result{}, err
 	}
 
-	// Build matrix ID from name and domain
-	matrixID := h.Name
-	if h.Status.MatrixUserID != "" {
-		matrixID = h.Status.MatrixUserID
-	}
-
-	args := []string{
-		"--matrix-id", matrixID,
-		"--name", h.Spec.DisplayName,
-		"--level", fmt.Sprintf("%d", h.Spec.PermissionLevel),
-	}
-	if len(h.Spec.AccessibleTeams) > 0 {
-		args = append(args, "--teams", strings.Join(h.Spec.AccessibleTeams, ","))
-	}
-	if len(h.Spec.AccessibleWorkers) > 0 {
-		args = append(args, "--workers", strings.Join(h.Spec.AccessibleWorkers, ","))
-	}
-	if h.Spec.Email != "" {
-		args = append(args, "--email", h.Spec.Email)
-	}
-	if h.Spec.Note != "" {
-		args = append(args, "--note", h.Spec.Note)
-	}
-
-	result, err := r.Executor.Run(ctx,
-		"/opt/hiclaw/agent/skills/human-management/scripts/create-human.sh",
-		args...,
-	)
+	// Register Matrix account for the human
+	userCreds, err := r.Matrix.EnsureUser(ctx, matrix.EnsureUserRequest{
+		Username: h.Name,
+	})
 	if err != nil {
 		h.Status.Phase = "Failed"
-		h.Status.Message = fmt.Sprintf("create-human.sh failed: %v", err)
+		h.Status.Message = fmt.Sprintf("Matrix registration failed: %v", err)
 		r.Status().Update(ctx, h)
 		return reconcile.Result{RequeueAfter: time.Minute}, err
 	}
 
-	h.Status.Phase = "Active"
-	h.Status.Message = ""
-	if result.JSON != nil {
-		if mid, ok := result.JSON["matrix_user_id"].(string); ok {
-			h.Status.MatrixUserID = mid
+	matrixUserID := r.Matrix.UserID(h.Name)
+
+	// Auto-join human to accessible worker rooms
+	var joinedRooms []string
+	for _, workerName := range h.Spec.AccessibleWorkers {
+		var worker v1beta1.Worker
+		if err := r.Get(ctx, client.ObjectKey{Name: workerName, Namespace: h.Namespace}, &worker); err != nil {
+			logger.Error(err, "failed to look up worker for room join", "worker", workerName)
+			continue
 		}
-		if pw, ok := result.JSON["password"].(string); ok {
-			h.Status.InitialPassword = pw
-		}
-		if sent, ok := result.JSON["email_sent"].(bool); ok {
-			h.Status.EmailSent = sent
-		}
-		if rooms, ok := result.JSON["rooms_invited"].([]interface{}); ok {
-			for _, r := range rooms {
-				if s, ok := r.(string); ok {
-					h.Status.Rooms = append(h.Status.Rooms, s)
-				}
+		if worker.Status.RoomID != "" {
+			if err := r.Matrix.JoinRoom(ctx, worker.Status.RoomID, userCreds.AccessToken); err != nil {
+				logger.Error(err, "failed to join worker room", "worker", workerName, "room", worker.Status.RoomID)
+			} else {
+				joinedRooms = append(joinedRooms, worker.Status.RoomID)
 			}
 		}
 	}
-	if err := r.Status().Update(ctx, h); err != nil {
-		return reconcile.Result{}, err
+
+	// Auto-join human to team rooms
+	for _, teamName := range h.Spec.AccessibleTeams {
+		var team v1beta1.Team
+		if err := r.Get(ctx, client.ObjectKey{Name: teamName, Namespace: h.Namespace}, &team); err != nil {
+			logger.Error(err, "failed to look up team for room join", "team", teamName)
+			continue
+		}
+		if team.Status.TeamRoomID != "" {
+			if err := r.Matrix.JoinRoom(ctx, team.Status.TeamRoomID, userCreds.AccessToken); err != nil {
+				logger.Error(err, "failed to join team room", "team", teamName, "room", team.Status.TeamRoomID)
+			} else {
+				joinedRooms = append(joinedRooms, team.Status.TeamRoomID)
+			}
+		}
 	}
 
-	logger.Info("human created", "name", h.Name, "matrixUserID", h.Status.MatrixUserID)
+	_ = r.Get(ctx, client.ObjectKeyFromObject(h), h)
+	h.Status.Phase = "Active"
+	h.Status.MatrixUserID = matrixUserID
+	h.Status.InitialPassword = userCreds.Password
+	h.Status.Rooms = joinedRooms
+	h.Status.Message = ""
+	if err := r.Status().Update(ctx, h); err != nil {
+		logger.Error(err, "failed to update human status (non-fatal)")
+	}
+
+	logger.Info("human created", "name", h.Name, "matrixUserID", matrixUserID, "rooms", len(joinedRooms))
 	return reconcile.Result{}, nil
 }
 
@@ -143,21 +141,20 @@ func (r *HumanReconciler) handleDelete(ctx context.Context, h *v1beta1.Human) er
 	logger := log.FromContext(ctx)
 	logger.Info("deleting human", "name", h.Name)
 
-	// Remove from humans-registry
-	_, err := r.Executor.RunSimple(ctx,
-		"/opt/hiclaw/agent/skills/human-management/scripts/manage-humans-registry.sh",
-		"--action", "remove", "--name", h.Name,
-	)
-	if err != nil {
-		logger.Error(err, "failed to remove human from registry", "name", h.Name)
+	// Remove from humans-registry (legacy, embedded mode)
+	if r.Executor != nil {
+		_, err := r.Executor.RunSimple(ctx,
+			"/opt/hiclaw/agent/skills/human-management/scripts/manage-humans-registry.sh",
+			"--action", "remove", "--name", h.Name,
+		)
+		if err != nil {
+			logger.Error(err, "failed to remove human from registry (non-fatal)")
+		}
 	}
-
-	// TODO: remove from all groupAllowFrom and kick from rooms
 
 	return nil
 }
 
-// SetupWithManager registers the HumanReconciler with the controller manager.
 func (r *HumanReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1beta1.Human{}).

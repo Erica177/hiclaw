@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	v1beta1 "github.com/hiclaw/hiclaw-controller/api/v1beta1"
+	"github.com/hiclaw/hiclaw-controller/internal/agentconfig"
 	"github.com/hiclaw/hiclaw-controller/internal/apiserver"
 	authpkg "github.com/hiclaw/hiclaw-controller/internal/auth"
 	"github.com/hiclaw/hiclaw-controller/internal/backend"
@@ -17,6 +18,9 @@ import (
 	"github.com/hiclaw/hiclaw-controller/internal/controller"
 	"github.com/hiclaw/hiclaw-controller/internal/credentials"
 	"github.com/hiclaw/hiclaw-controller/internal/executor"
+	"github.com/hiclaw/hiclaw-controller/internal/gateway"
+	"github.com/hiclaw/hiclaw-controller/internal/matrix"
+	"github.com/hiclaw/hiclaw-controller/internal/oss"
 	"github.com/hiclaw/hiclaw-controller/internal/proxy"
 	"github.com/hiclaw/hiclaw-controller/internal/server"
 	"github.com/hiclaw/hiclaw-controller/internal/store"
@@ -150,37 +154,91 @@ func main() {
 		}
 	}
 
+	// --- Go service clients ---
+	matrixClient := matrix.NewTuwunelClient(cfg.MatrixConfig(), nil)
+	gwClient := gateway.NewHigressClient(cfg.GatewayConfig(), nil)
+	ossClient := oss.NewMinIOClient(cfg.OSSConfig())
+	var ossAdminClient oss.StorageAdminClient
+	if cfg.KubeMode == "embedded" {
+		ossAdminClient = oss.NewMinIOAdminClient(cfg.OSSConfig())
+	}
+	agentGen := agentconfig.NewGenerator(cfg.AgentConfig())
+	credStore := &controller.FileCredentialStore{Dir: "/data/worker-creds"}
+
 	// --- Register reconcilers ---
-	higressClient := &controller.HigressClient{
-		BaseURL:    cfg.HigressBaseURL,
-		CookieFile: cfg.HigressCookieFile,
+	sharedReconcilerFields := struct {
+		matrix      matrix.Client
+		gateway     gateway.Client
+		oss         oss.StorageClient
+		ossAdmin    oss.StorageAdminClient
+		agentConfig *agentconfig.Generator
+		backend     *backend.Registry
+		creds       controller.CredentialStore
+		kubeMode    string
+	}{
+		matrix:      matrixClient,
+		gateway:     gwClient,
+		oss:         ossClient,
+		ossAdmin:    ossAdminClient,
+		agentConfig: agentGen,
+		backend:     registry,
+		creds:       credStore,
+		kubeMode:    cfg.KubeMode,
 	}
 
 	if err := (&controller.WorkerReconciler{
-		Client:   mgr.GetClient(),
-		Executor: shell,
-		Packages: packages,
-		Higress:  higressClient,
-		Backend:  registry,
-		KubeMode: cfg.KubeMode,
+		Client:            mgr.GetClient(),
+		Matrix:            sharedReconcilerFields.matrix,
+		Gateway:           sharedReconcilerFields.gateway,
+		OSS:               sharedReconcilerFields.oss,
+		OSSAdmin:          sharedReconcilerFields.ossAdmin,
+		AgentConfig:       sharedReconcilerFields.agentConfig,
+		Backend:           sharedReconcilerFields.backend,
+		Creds:             sharedReconcilerFields.creds,
+		Executor:          shell,
+		Packages:          packages,
+		KubeMode:          cfg.KubeMode,
+		ManagerConfigPath: envOrDefault("HICLAW_MANAGER_CONFIG_PATH", "/root/openclaw.json"),
+		AgentFSDir:        envOrDefault("HICLAW_AGENT_FS_DIR", "/root/hiclaw-fs/agents"),
+		WorkerAgentDir:    envOrDefault("HICLAW_WORKER_AGENT_DIR", "/opt/hiclaw/agent/worker-agent"),
+		RegistryPath:      envOrDefault("HICLAW_REGISTRY_PATH", "/root/workers-registry.json"),
+		StoragePrefix:     cfg.OSSStoragePrefix,
+		MatrixDomain:      cfg.MatrixDomain,
+		AdminUser:         cfg.MatrixAdminUser,
 	}).SetupWithManager(mgr); err != nil {
 		logger.Error(err, "failed to setup WorkerReconciler")
 		os.Exit(1)
 	}
 
 	if err := (&controller.TeamReconciler{
-		Client:   mgr.GetClient(),
-		Executor: shell,
-		Packages: packages,
-		Higress:  higressClient,
+		Client:            mgr.GetClient(),
+		Matrix:            sharedReconcilerFields.matrix,
+		Gateway:           sharedReconcilerFields.gateway,
+		OSS:               sharedReconcilerFields.oss,
+		OSSAdmin:          sharedReconcilerFields.ossAdmin,
+		AgentConfig:       sharedReconcilerFields.agentConfig,
+		Backend:           sharedReconcilerFields.backend,
+		Creds:             sharedReconcilerFields.creds,
+		Executor:          shell,
+		Packages:          packages,
+		KubeMode:          cfg.KubeMode,
+		ManagerConfigPath: envOrDefault("HICLAW_MANAGER_CONFIG_PATH", "/root/openclaw.json"),
+		AgentFSDir:        envOrDefault("HICLAW_AGENT_FS_DIR", "/root/hiclaw-fs/agents"),
+		WorkerAgentDir:    envOrDefault("HICLAW_WORKER_AGENT_DIR", "/opt/hiclaw/agent/worker-agent"),
+		RegistryPath:      envOrDefault("HICLAW_REGISTRY_PATH", "/root/workers-registry.json"),
+		StoragePrefix:     cfg.OSSStoragePrefix,
+		MatrixDomain:      cfg.MatrixDomain,
+		AdminUser:         cfg.MatrixAdminUser,
 	}).SetupWithManager(mgr); err != nil {
 		logger.Error(err, "failed to setup TeamReconciler")
 		os.Exit(1)
 	}
 
 	if err := (&controller.HumanReconciler{
-		Client:   mgr.GetClient(),
-		Executor: shell,
+		Client:       mgr.GetClient(),
+		Matrix:       sharedReconcilerFields.matrix,
+		MatrixDomain: cfg.MatrixDomain,
+		Executor:     shell,
 	}).SetupWithManager(mgr); err != nil {
 		logger.Error(err, "failed to setup HumanReconciler")
 		os.Exit(1)
@@ -253,6 +311,13 @@ func registerControllerAPIRoutes(
 		proxyHandler := proxy.NewHandler(cfg.SocketPath, validator)
 		mux.Handle("/docker/", authMw.RequireManager(http.StripPrefix("/docker", proxyHandler)))
 	}
+}
+
+func envOrDefault(key, defaultVal string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return defaultVal
 }
 
 func buildCloudCredentials(cfg *config.Config) backend.CloudCredentialProvider {

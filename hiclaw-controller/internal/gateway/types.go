@@ -10,7 +10,8 @@ type Config struct {
 // ConsumerRequest describes a gateway consumer to create.
 type ConsumerRequest struct {
 	Name          string // consumer name, e.g. "worker-alice"
-	CredentialKey string // API key for key-auth
+	CredentialKey string // API key for key-auth (self-hosted Higress)
+	ConsumerID    string // platform-specific consumer ID (cloud APIG, optional)
 }
 
 // ConsumerResult holds the result of an EnsureConsumer call.
