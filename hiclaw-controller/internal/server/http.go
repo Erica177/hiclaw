@@ -79,9 +79,9 @@ func NewHTTPServer(addr string, deps ServerDeps) *HTTPServer {
 
 	// --- Gateway ---
 	gh := NewGatewayHandler(deps.Gateway)
-	mux.Handle("POST /api/v1/gateway/consumers", mw.RequireManager(http.HandlerFunc(gh.CreateConsumer)))
-	mux.Handle("POST /api/v1/gateway/consumers/{id}/bind", mw.RequireManager(http.HandlerFunc(gh.BindConsumer)))
-	mux.Handle("DELETE /api/v1/gateway/consumers/{id}", mw.RequireManager(http.HandlerFunc(gh.DeleteConsumer)))
+	mux.Handle("POST /api/v1/gateway/consumers", mw.RequireRoles(managerOrAdmin, http.HandlerFunc(gh.CreateConsumer)))
+	mux.Handle("POST /api/v1/gateway/consumers/{id}/bind", mw.RequireRoles(managerOrAdmin, http.HandlerFunc(gh.BindConsumer)))
+	mux.Handle("DELETE /api/v1/gateway/consumers/{id}", mw.RequireRoles(managerOrAdmin, http.HandlerFunc(gh.DeleteConsumer)))
 
 	// --- Credentials ---
 	ch := NewCredentialsHandler(deps.STS)

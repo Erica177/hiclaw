@@ -33,14 +33,25 @@ type ClusterStatusResponse struct {
 }
 
 func (h *StatusHandler) ClusterStatus(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
 	var workers v1beta1.WorkerList
-	_ = h.k8s.List(r.Context(), &workers, client.InNamespace(h.namespace))
+	if err := h.k8s.List(ctx, &workers, client.InNamespace(h.namespace)); err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to list workers: "+err.Error())
+		return
+	}
 
 	var teams v1beta1.TeamList
-	_ = h.k8s.List(r.Context(), &teams, client.InNamespace(h.namespace))
+	if err := h.k8s.List(ctx, &teams, client.InNamespace(h.namespace)); err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to list teams: "+err.Error())
+		return
+	}
 
 	var humans v1beta1.HumanList
-	_ = h.k8s.List(r.Context(), &humans, client.InNamespace(h.namespace))
+	if err := h.k8s.List(ctx, &humans, client.InNamespace(h.namespace)); err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to list humans: "+err.Error())
+		return
+	}
 
 	httputil.WriteJSON(w, http.StatusOK, ClusterStatusResponse{
 		KubeMode:     h.kubeMode,

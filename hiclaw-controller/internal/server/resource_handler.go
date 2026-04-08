@@ -6,6 +6,7 @@ import (
 
 	v1beta1 "github.com/hiclaw/hiclaw-controller/api/v1beta1"
 	"github.com/hiclaw/hiclaw-controller/internal/httputil"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -325,7 +326,9 @@ func (h *ResourceHandler) UpdateTeam(w http.ResponseWriter, r *http.Request) {
 		team.Spec.ChannelPolicy = req.ChannelPolicy
 	}
 	if req.Leader != nil {
-		team.Spec.Leader.Model = req.Leader.Model
+		if req.Leader.Model != "" {
+			team.Spec.Leader.Model = req.Leader.Model
+		}
 		if req.Leader.Identity != "" {
 			team.Spec.Leader.Identity = req.Leader.Identity
 		}
@@ -547,28 +550,11 @@ func humanToResponse(h *v1beta1.Human) HumanResponse {
 // writeK8sError maps K8s API errors to HTTP status codes.
 func writeK8sError(w http.ResponseWriter, op string, err error) {
 	switch {
-	case client.IgnoreNotFound(err) == nil:
+	case apierrors.IsNotFound(err):
 		httputil.WriteError(w, http.StatusNotFound, op+": not found")
-	case isAlreadyExists(err):
+	case apierrors.IsAlreadyExists(err):
 		httputil.WriteError(w, http.StatusConflict, op+": already exists")
 	default:
 		httputil.WriteError(w, http.StatusInternalServerError, op+": "+err.Error())
 	}
-}
-
-func isAlreadyExists(err error) bool {
-	return err != nil && (contains(err.Error(), "already exists") || contains(err.Error(), "AlreadyExists"))
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && searchString(s, substr)
-}
-
-func searchString(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }

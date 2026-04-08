@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"log"
 	"net/http"
 	"sync"
@@ -214,19 +215,11 @@ func (h *LifecycleHandler) isReady(name string) bool {
 
 func writeBackendError(w http.ResponseWriter, err error) {
 	switch {
-	case isBackendNotFound(err):
+	case errors.Is(err, backend.ErrNotFound):
 		httputil.WriteError(w, http.StatusNotFound, err.Error())
-	case isBackendConflict(err):
+	case errors.Is(err, backend.ErrConflict):
 		httputil.WriteError(w, http.StatusConflict, err.Error())
 	default:
 		httputil.WriteError(w, http.StatusInternalServerError, err.Error())
 	}
-}
-
-func isBackendNotFound(err error) bool {
-	return err != nil && contains(err.Error(), "not found")
-}
-
-func isBackendConflict(err error) bool {
-	return err != nil && contains(err.Error(), "already exists")
 }

@@ -168,11 +168,6 @@ type ConsumerResponse struct {
 	Status     string `json:"status"`
 }
 
-type BindConsumerRequest struct {
-	ModelAPIID string `json:"model_api_id"`
-	EnvID      string `json:"env_id"`
-}
-
 // --- Lifecycle API types ---
 
 type WorkerLifecycleResponse struct {
