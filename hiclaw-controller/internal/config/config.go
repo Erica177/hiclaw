@@ -5,8 +5,12 @@ import (
 	"path/filepath"
 	"strconv"
 
+	"github.com/hiclaw/hiclaw-controller/internal/agentconfig"
 	"github.com/hiclaw/hiclaw-controller/internal/backend"
 	"github.com/hiclaw/hiclaw-controller/internal/credentials"
+	"github.com/hiclaw/hiclaw-controller/internal/gateway"
+	"github.com/hiclaw/hiclaw-controller/internal/matrix"
+	"github.com/hiclaw/hiclaw-controller/internal/oss"
 )
 
 type Config struct {
@@ -26,8 +30,10 @@ type Config struct {
 	ManagerAPIKey string // HICLAW_CONTROLLER_API_KEY
 
 	// Higress
-	HigressBaseURL    string
-	HigressCookieFile string
+	HigressBaseURL      string
+	HigressCookieFile   string
+	HigressAdminUser    string
+	HigressAdminPassword string
 
 	// Worker backend selection
 	WorkerBackend string
@@ -61,6 +67,32 @@ type Config struct {
 
 	// Controller URL (advertised to workers for STS refresh etc.)
 	ControllerURL string
+
+	// Matrix server
+	MatrixServerURL         string
+	MatrixDomain            string
+	MatrixRegistrationToken string
+	MatrixAdminUser         string
+	MatrixAdminPassword     string
+	MatrixE2EE              bool
+
+	// Object storage (embedded MinIO)
+	OSSStoragePrefix string
+
+	// AI model
+	DefaultModel       string
+	EmbeddingModel     string
+	Runtime            string
+	ModelContextWindow int
+	ModelMaxTokens     int
+
+	// CMS observability
+	CMSTracesEnabled  bool
+	CMSMetricsEnabled bool
+	CMSEndpoint       string
+	CMSLicenseKey     string
+	CMSProject        string
+	CMSWorkspace      string
 }
 
 func LoadConfig() *Config {
@@ -84,8 +116,10 @@ func LoadConfig() *Config {
 
 		ManagerAPIKey: os.Getenv("HICLAW_CONTROLLER_API_KEY"),
 
-		HigressBaseURL:    envOrDefault("HIGRESS_BASE_URL", "http://127.0.0.1:8001"),
-		HigressCookieFile: os.Getenv("HIGRESS_COOKIE_FILE"),
+		HigressBaseURL:      envOrDefault("HIGRESS_BASE_URL", "http://127.0.0.1:8001"),
+		HigressCookieFile:   os.Getenv("HIGRESS_COOKIE_FILE"),
+		HigressAdminUser:    envOrDefault("HICLAW_HIGRESS_ADMIN_USER", "admin"),
+		HigressAdminPassword: envOrDefault("HICLAW_HIGRESS_ADMIN_PASSWORD", "admin"),
 
 		WorkerBackend: firstNonEmpty(
 			os.Getenv("HICLAW_WORKER_BACKEND"),
@@ -119,6 +153,28 @@ func LoadConfig() *Config {
 			os.Getenv("HICLAW_CONTROLLER_URL"),
 			os.Getenv("HICLAW_ORCHESTRATOR_URL"), // legacy fallback
 		),
+
+		MatrixServerURL:         envOrDefault("HICLAW_MATRIX_URL", "http://matrix-local.hiclaw.io:8080"),
+		MatrixDomain:            envOrDefault("HICLAW_MATRIX_DOMAIN", "matrix-local.hiclaw.io:8080"),
+		MatrixRegistrationToken: os.Getenv("HICLAW_MATRIX_REGISTRATION_TOKEN"),
+		MatrixAdminUser:         envOrDefault("HICLAW_ADMIN_USER", "admin"),
+		MatrixAdminPassword:     envOrDefault("HICLAW_ADMIN_PASSWORD", "admin"),
+		MatrixE2EE:              os.Getenv("HICLAW_MATRIX_E2EE") == "1" || os.Getenv("HICLAW_MATRIX_E2EE") == "true",
+
+		OSSStoragePrefix: envOrDefault("HICLAW_STORAGE_PREFIX", "hiclaw/hiclaw-storage"),
+
+		DefaultModel:       envOrDefault("HICLAW_DEFAULT_MODEL", "qwen3.5-plus"),
+		EmbeddingModel:     os.Getenv("HICLAW_EMBEDDING_MODEL"),
+		Runtime:            envOrDefault("HICLAW_RUNTIME", "docker"),
+		ModelContextWindow: envOrDefaultInt("HICLAW_MODEL_CONTEXT_WINDOW", 0),
+		ModelMaxTokens:     envOrDefaultInt("HICLAW_MODEL_MAX_TOKENS", 0),
+
+		CMSTracesEnabled:  envBool("HICLAW_CMS_TRACES_ENABLED"),
+		CMSMetricsEnabled: envBool("HICLAW_CMS_METRICS_ENABLED"),
+		CMSEndpoint:       os.Getenv("HICLAW_CMS_ENDPOINT"),
+		CMSLicenseKey:     os.Getenv("HICLAW_CMS_LICENSE_KEY"),
+		CMSProject:        os.Getenv("HICLAW_CMS_PROJECT"),
+		CMSWorkspace:      os.Getenv("HICLAW_CMS_WORKSPACE"),
 	}
 }
 
@@ -190,6 +246,11 @@ func envOrDefaultInt(key string, defaultVal int) int {
 	return defaultVal
 }
 
+func envBool(key string) bool {
+	v := os.Getenv(key)
+	return v == "1" || v == "true" || v == "True" || v == "TRUE"
+}
+
 func firstNonEmpty(values ...string) string {
 	for _, v := range values {
 		if v != "" {
@@ -197,4 +258,51 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func (c *Config) MatrixConfig() matrix.Config {
+	return matrix.Config{
+		ServerURL:         c.MatrixServerURL,
+		Domain:            c.MatrixDomain,
+		RegistrationToken: c.MatrixRegistrationToken,
+		AdminUser:         c.MatrixAdminUser,
+		AdminPassword:     c.MatrixAdminPassword,
+		E2EEEnabled:       c.MatrixE2EE,
+	}
+}
+
+func (c *Config) GatewayConfig() gateway.Config {
+	return gateway.Config{
+		ConsoleURL:    c.HigressBaseURL,
+		AdminUser:     c.HigressAdminUser,
+		AdminPassword: c.HigressAdminPassword,
+	}
+}
+
+func (c *Config) OSSConfig() oss.Config {
+	return oss.Config{
+		StoragePrefix: c.OSSStoragePrefix,
+		Bucket:        c.OSSBucket,
+	}
+}
+
+func (c *Config) AgentConfig() agentconfig.Config {
+	return agentconfig.Config{
+		MatrixDomain:       c.MatrixDomain,
+		MatrixServerURL:    c.MatrixServerURL,
+		AIGatewayURL:       envOrDefault("HICLAW_AI_GATEWAY_URL", "http://aigw-local.hiclaw.io:8080"),
+		AdminUser:          c.MatrixAdminUser,
+		DefaultModel:       c.DefaultModel,
+		EmbeddingModel:     c.EmbeddingModel,
+		Runtime:            c.Runtime,
+		E2EEEnabled:        c.MatrixE2EE,
+		ModelContextWindow: c.ModelContextWindow,
+		ModelMaxTokens:     c.ModelMaxTokens,
+		CMSTracesEnabled:   c.CMSTracesEnabled,
+		CMSMetricsEnabled:  c.CMSMetricsEnabled,
+		CMSEndpoint:        c.CMSEndpoint,
+		CMSLicenseKey:      c.CMSLicenseKey,
+		CMSProject:         c.CMSProject,
+		CMSWorkspace:       c.CMSWorkspace,
+	}
 }

@@ -1,0 +1,521 @@
+package gateway
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"math/rand"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+)
+
+// HigressClient implements Client for self-hosted Higress gateway.
+type HigressClient struct {
+	config Config
+	http   *http.Client
+
+	mu      sync.Mutex
+	cookies []*http.Cookie
+}
+
+// NewHigressClient creates a gateway Client for Higress Console API.
+func NewHigressClient(cfg Config, httpClient *http.Client) *HigressClient {
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 30 * time.Second}
+	}
+	if cfg.AdminUser == "" {
+		cfg.AdminUser = "admin"
+	}
+	if cfg.AdminPassword == "" {
+		cfg.AdminPassword = "admin"
+	}
+	return &HigressClient{config: cfg, http: httpClient}
+}
+
+// ensureSession logs in to Higress Console and caches the session cookie.
+func (c *HigressClient) ensureSession(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if len(c.cookies) > 0 {
+		return nil
+	}
+
+	body := fmt.Sprintf(`{"username":%q,"password":%q}`, c.config.AdminUser, c.config.AdminPassword)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		c.config.ConsoleURL+"/session/login",
+		strings.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("higress login: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return fmt.Errorf("higress login: HTTP %d", resp.StatusCode)
+	}
+
+	c.cookies = resp.Cookies()
+	return nil
+}
+
+func (c *HigressClient) EnsureConsumer(ctx context.Context, req ConsumerRequest) (*ConsumerResult, error) {
+	body := map[string]interface{}{
+		"name": req.Name,
+		"credentials": []map[string]interface{}{
+			{
+				"type":   "key-auth",
+				"source": "BEARER",
+				"values": []string{req.CredentialKey},
+			},
+		},
+	}
+
+	_, statusCode, err := c.doJSON(ctx, http.MethodPost, "/v1/consumers", body)
+	if err != nil {
+		return nil, fmt.Errorf("ensure consumer %s: %w", req.Name, err)
+	}
+
+	status := "created"
+	if statusCode == http.StatusConflict {
+		status = "exists"
+	} else if statusCode != http.StatusOK && statusCode != http.StatusCreated {
+		return nil, fmt.Errorf("ensure consumer %s: HTTP %d", req.Name, statusCode)
+	}
+
+	return &ConsumerResult{
+		Status: status,
+		APIKey: req.CredentialKey,
+	}, nil
+}
+
+func (c *HigressClient) DeleteConsumer(ctx context.Context, name string) error {
+	_, statusCode, err := c.doJSON(ctx, http.MethodDelete, "/v1/consumers/"+name, nil)
+	if err != nil {
+		return fmt.Errorf("delete consumer %s: %w", name, err)
+	}
+	if statusCode != http.StatusOK && statusCode != http.StatusNoContent && statusCode != http.StatusNotFound {
+		return fmt.Errorf("delete consumer %s: HTTP %d", name, statusCode)
+	}
+	return nil
+}
+
+func (c *HigressClient) AuthorizeAIRoutes(ctx context.Context, consumerName string) error {
+	return c.modifyAIRoutes(ctx, consumerName, true)
+}
+
+func (c *HigressClient) DeauthorizeAIRoutes(ctx context.Context, consumerName string) error {
+	return c.modifyAIRoutes(ctx, consumerName, false)
+}
+
+func (c *HigressClient) modifyAIRoutes(ctx context.Context, consumerName string, add bool) error {
+	respBody, statusCode, err := c.doJSON(ctx, http.MethodGet, "/v1/ai/routes", nil)
+	if err != nil {
+		return fmt.Errorf("list AI routes: %w", err)
+	}
+	if statusCode != http.StatusOK {
+		return fmt.Errorf("list AI routes: HTTP %d", statusCode)
+	}
+
+	var listResp struct {
+		Data []json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(respBody, &listResp); err != nil {
+		return fmt.Errorf("decode AI routes list: %w", err)
+	}
+
+	const maxRetries = 5
+
+	for _, raw := range listResp.Data {
+		var routeInfo struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(raw, &routeInfo); err != nil || routeInfo.Name == "" {
+			continue
+		}
+
+		for attempt := 0; attempt < maxRetries; attempt++ {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+
+			routeBody, sc, err := c.doJSON(ctx, http.MethodGet,
+				"/v1/ai/routes/"+routeInfo.Name, nil)
+			if err != nil || sc != http.StatusOK {
+				break
+			}
+
+			var routeResp struct {
+				Data json.RawMessage `json:"data"`
+			}
+			if err := json.Unmarshal(routeBody, &routeResp); err != nil {
+				break
+			}
+			routeData := routeResp.Data
+			if routeData == nil {
+				routeData = routeBody
+			}
+
+			var route map[string]interface{}
+			if err := json.Unmarshal(routeData, &route); err != nil {
+				break
+			}
+
+			authConfig, _ := route["authConfig"].(map[string]interface{})
+			if authConfig == nil {
+				authConfig = make(map[string]interface{})
+			}
+
+			consumers := toStringSlice(authConfig["allowedConsumers"])
+
+			if add {
+				if containsString(consumers, consumerName) {
+					break // already authorized
+				}
+				consumers = append(consumers, consumerName)
+			} else {
+				consumers = removeString(consumers, consumerName)
+			}
+
+			authConfig["allowedConsumers"] = consumers
+			route["authConfig"] = authConfig
+
+			_, sc, err = c.doJSON(ctx, http.MethodPut,
+				"/v1/ai/routes/"+routeInfo.Name, route)
+			if err != nil {
+				break
+			}
+			if sc == http.StatusOK {
+				break
+			}
+			if sc == http.StatusConflict {
+				time.Sleep(time.Duration(rand.Intn(3)+1) * time.Second)
+				continue
+			}
+			break
+		}
+	}
+
+	return nil
+}
+
+func (c *HigressClient) AuthorizeMCPServers(ctx context.Context, consumerName string, mcpServers []string) ([]string, error) {
+	return c.modifyMCPServers(ctx, consumerName, mcpServers, true)
+}
+
+func (c *HigressClient) DeauthorizeMCPServers(ctx context.Context, consumerName string, mcpServers []string) error {
+	_, err := c.modifyMCPServers(ctx, consumerName, mcpServers, false)
+	return err
+}
+
+func (c *HigressClient) modifyMCPServers(ctx context.Context, consumerName string, mcpServers []string, add bool) ([]string, error) {
+	allMCP, err := c.listMCPServers(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	existingNames := make(map[string]bool)
+	for _, m := range allMCP {
+		existingNames[m.Name] = true
+	}
+
+	// Determine target list
+	targets := mcpServers
+	if len(targets) == 0 && add {
+		for name := range existingNames {
+			targets = append(targets, name)
+		}
+	}
+
+	var resolved []string
+
+	for _, mcpName := range targets {
+		mcpName = strings.TrimSpace(mcpName)
+		if mcpName == "" {
+			continue
+		}
+		if !existingNames[mcpName] {
+			continue
+		}
+
+		// Re-fetch latest state to minimize race window
+		freshMCP, err := c.listMCPServers(ctx)
+		if err != nil {
+			continue
+		}
+
+		var currentConsumers []string
+		for _, m := range freshMCP {
+			if m.Name == mcpName {
+				currentConsumers = m.AllowedConsumers
+				break
+			}
+		}
+
+		var newConsumers []string
+		if add {
+			// Always include "manager", then existing (minus target), then target
+			newConsumers = []string{"manager"}
+			for _, ec := range currentConsumers {
+				if ec == "manager" || ec == consumerName {
+					continue
+				}
+				newConsumers = append(newConsumers, ec)
+			}
+			newConsumers = append(newConsumers, consumerName)
+		} else {
+			for _, ec := range currentConsumers {
+				if ec != consumerName {
+					newConsumers = append(newConsumers, ec)
+				}
+			}
+		}
+
+		body := map[string]interface{}{
+			"mcpServerName": mcpName,
+			"consumers":     newConsumers,
+		}
+		_, sc, err := c.doJSON(ctx, http.MethodPut, "/v1/mcpServer/consumers", body)
+		if err != nil || (sc != http.StatusOK && sc != http.StatusNoContent) {
+			continue
+		}
+		resolved = append(resolved, mcpName)
+	}
+
+	return resolved, nil
+}
+
+func (c *HigressClient) ExposePort(ctx context.Context, req PortExposeRequest) error {
+	svcSrc := fmt.Sprintf("worker-%s-%d", req.WorkerName, req.Port)
+	routeN := svcSrc
+	domain := req.Domain
+	if domain == "" {
+		domain = fmt.Sprintf("worker-%s-%d-local.hiclaw.io", req.WorkerName, req.Port)
+	}
+	dnsHost := req.ServiceHost
+	if dnsHost == "" {
+		dnsHost = fmt.Sprintf("%s.local", req.WorkerName)
+	}
+
+	if err := c.ensureDomain(ctx, domain); err != nil {
+		return fmt.Errorf("expose port %d: %w", req.Port, err)
+	}
+	if err := c.ensureServiceSource(ctx, svcSrc, dnsHost, req.Port); err != nil {
+		return fmt.Errorf("expose port %d: %w", req.Port, err)
+	}
+	if err := c.ensureRoute(ctx, routeN, []string{domain}, svcSrc+".dns", req.Port); err != nil {
+		return fmt.Errorf("expose port %d: %w", req.Port, err)
+	}
+	return nil
+}
+
+func (c *HigressClient) UnexposePort(ctx context.Context, req PortExposeRequest) error {
+	svcSrc := fmt.Sprintf("worker-%s-%d", req.WorkerName, req.Port)
+	routeN := svcSrc
+	domain := req.Domain
+	if domain == "" {
+		domain = fmt.Sprintf("worker-%s-%d-local.hiclaw.io", req.WorkerName, req.Port)
+	}
+
+	c.deleteRoute(ctx, routeN)
+	c.deleteServiceSource(ctx, svcSrc)
+	c.deleteDomain(ctx, domain)
+	return nil
+}
+
+// ── Higress Console primitives (migrated from controller/higress_client.go) ──
+
+func (c *HigressClient) ensureDomain(ctx context.Context, name string) error {
+	body := map[string]interface{}{"name": name, "enableHttps": "off"}
+	_, sc, err := c.doJSON(ctx, http.MethodPost, "/v1/domains", body)
+	if err != nil {
+		return fmt.Errorf("ensure domain %s: %w", name, err)
+	}
+	if sc != 200 && sc != 201 && sc != 409 {
+		return fmt.Errorf("ensure domain %s: HTTP %d", name, sc)
+	}
+	return nil
+}
+
+func (c *HigressClient) ensureServiceSource(ctx context.Context, name, dnsDomain string, port int) error {
+	body := map[string]interface{}{
+		"type": "dns", "name": name, "domain": dnsDomain,
+		"port": port, "protocol": "http",
+		"properties": map[string]interface{}{},
+		"authN":      map[string]interface{}{"enabled": false},
+	}
+	_, sc, err := c.doJSON(ctx, http.MethodPost, "/v1/service-sources", body)
+	if err != nil {
+		return fmt.Errorf("ensure service source %s: %w", name, err)
+	}
+	if sc != 200 && sc != 201 && sc != 409 {
+		return fmt.Errorf("ensure service source %s: HTTP %d", name, sc)
+	}
+	return nil
+}
+
+func (c *HigressClient) ensureRoute(ctx context.Context, name string, domains []string, serviceName string, port int) error {
+	body := map[string]interface{}{
+		"name":    name,
+		"domains": domains,
+		"path":    map[string]interface{}{"matchType": "PRE", "matchValue": "/", "caseSensitive": false},
+		"services": []map[string]interface{}{
+			{"name": serviceName, "port": port, "weight": 100},
+		},
+	}
+	_, sc, err := c.doJSON(ctx, http.MethodPost, "/v1/routes", body)
+	if err != nil {
+		return fmt.Errorf("ensure route %s: %w", name, err)
+	}
+	if sc == 200 || sc == 201 || sc == 409 {
+		return nil
+	}
+	return fmt.Errorf("ensure route %s: HTTP %d", name, sc)
+}
+
+func (c *HigressClient) deleteRoute(ctx context.Context, name string) {
+	c.doJSON(ctx, http.MethodDelete, "/v1/routes/"+name, nil)
+}
+
+func (c *HigressClient) deleteServiceSource(ctx context.Context, name string) {
+	c.doJSON(ctx, http.MethodDelete, "/v1/service-sources/"+name, nil)
+}
+
+func (c *HigressClient) deleteDomain(ctx context.Context, name string) {
+	c.doJSON(ctx, http.MethodDelete, "/v1/domains/"+name, nil)
+}
+
+func (c *HigressClient) listMCPServers(ctx context.Context) ([]MCPServerAuth, error) {
+	respBody, sc, err := c.doJSON(ctx, http.MethodGet, "/v1/mcpServer", nil)
+	if err != nil {
+		return nil, fmt.Errorf("list MCP servers: %w", err)
+	}
+	if sc != http.StatusOK {
+		return nil, fmt.Errorf("list MCP servers: HTTP %d", sc)
+	}
+
+	var listResp struct {
+		Data []json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(respBody, &listResp); err != nil {
+		// Might be a plain array
+		var arr []json.RawMessage
+		if err2 := json.Unmarshal(respBody, &arr); err2 != nil {
+			return nil, fmt.Errorf("decode MCP servers: %w", err)
+		}
+		listResp.Data = arr
+	}
+
+	var result []MCPServerAuth
+	for _, raw := range listResp.Data {
+		var m struct {
+			Name             string `json:"name"`
+			ConsumerAuthInfo struct {
+				AllowedConsumers []string `json:"allowedConsumers"`
+			} `json:"consumerAuthInfo"`
+		}
+		if err := json.Unmarshal(raw, &m); err != nil {
+			continue
+		}
+		result = append(result, MCPServerAuth{
+			Name:             m.Name,
+			AllowedConsumers: m.ConsumerAuthInfo.AllowedConsumers,
+		})
+	}
+	return result, nil
+}
+
+// doJSON performs an HTTP request with session cookies.
+func (c *HigressClient) doJSON(ctx context.Context, method, path string, reqBody interface{}) ([]byte, int, error) {
+	if err := c.ensureSession(ctx); err != nil {
+		return nil, 0, err
+	}
+
+	var bodyReader io.Reader
+	if reqBody != nil {
+		data, err := json.Marshal(reqBody)
+		if err != nil {
+			return nil, 0, fmt.Errorf("marshal request: %w", err)
+		}
+		bodyReader = bytes.NewReader(data)
+	}
+
+	url := strings.TrimRight(c.config.ConsoleURL, "/") + path
+	req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
+	if err != nil {
+		return nil, 0, err
+	}
+	if reqBody != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	c.mu.Lock()
+	for _, cookie := range c.cookies {
+		req.AddCookie(cookie)
+	}
+	c.mu.Unlock()
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == 401 || resp.StatusCode == 403 {
+		c.mu.Lock()
+		c.cookies = nil
+		c.mu.Unlock()
+	}
+
+	respBody, _ := io.ReadAll(resp.Body)
+	return respBody, resp.StatusCode, nil
+}
+
+// ── helpers ──
+
+func toStringSlice(v interface{}) []string {
+	if v == nil {
+		return nil
+	}
+	switch arr := v.(type) {
+	case []interface{}:
+		var result []string
+		for _, item := range arr {
+			if s, ok := item.(string); ok {
+				result = append(result, s)
+			}
+		}
+		return result
+	case []string:
+		return arr
+	}
+	return nil
+}
+
+func containsString(slice []string, s string) bool {
+	for _, item := range slice {
+		if item == s {
+			return true
+		}
+	}
+	return false
+}
+
+func removeString(slice []string, s string) []string {
+	var result []string
+	for _, item := range slice {
+		if item != s {
+			result = append(result, item)
+		}
+	}
+	return result
+}

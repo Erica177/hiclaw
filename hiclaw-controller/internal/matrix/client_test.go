@@ -1,0 +1,210 @@
+package matrix
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
+
+func TestEnsureUser_NewRegistration(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/_matrix/client/v3/register":
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]string{
+				"user_id":      "@alice:test.domain",
+				"access_token": "token-abc",
+			})
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	c := NewTuwunelClient(Config{
+		ServerURL:         server.URL,
+		Domain:            "test.domain",
+		RegistrationToken: "reg-secret",
+	}, server.Client())
+
+	creds, err := c.EnsureUser(context.Background(), EnsureUserRequest{
+		Username: "alice",
+		Password: "pass123",
+	})
+	if err != nil {
+		t.Fatalf("EnsureUser: %v", err)
+	}
+	if !creds.Created {
+		t.Error("expected Created=true for new registration")
+	}
+	if creds.UserID != "@alice:test.domain" {
+		t.Errorf("UserID = %q, want @alice:test.domain", creds.UserID)
+	}
+	if creds.AccessToken != "token-abc" {
+		t.Errorf("AccessToken = %q, want token-abc", creds.AccessToken)
+	}
+	if creds.Password != "pass123" {
+		t.Errorf("Password = %q, want pass123", creds.Password)
+	}
+}
+
+func TestEnsureUser_ExistingUser(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/_matrix/client/v3/register":
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{
+				"errcode": "M_USER_IN_USE",
+				"error":   "User ID already taken",
+			})
+		case "/_matrix/client/v3/login":
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]string{
+				"access_token": "login-token-xyz",
+			})
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	c := NewTuwunelClient(Config{
+		ServerURL:         server.URL,
+		Domain:            "test.domain",
+		RegistrationToken: "reg-secret",
+	}, server.Client())
+
+	creds, err := c.EnsureUser(context.Background(), EnsureUserRequest{
+		Username: "bob",
+		Password: "existing-pass",
+	})
+	if err != nil {
+		t.Fatalf("EnsureUser: %v", err)
+	}
+	if creds.Created {
+		t.Error("expected Created=false for existing user")
+	}
+	if creds.AccessToken != "login-token-xyz" {
+		t.Errorf("AccessToken = %q, want login-token-xyz", creds.AccessToken)
+	}
+}
+
+func TestEnsureUser_GeneratesPassword(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{
+			"user_id":      "@gen:test.domain",
+			"access_token": "tok",
+		})
+	}))
+	defer server.Close()
+
+	c := NewTuwunelClient(Config{
+		ServerURL:         server.URL,
+		Domain:            "test.domain",
+		RegistrationToken: "reg-secret",
+	}, server.Client())
+
+	creds, err := c.EnsureUser(context.Background(), EnsureUserRequest{Username: "gen"})
+	if err != nil {
+		t.Fatalf("EnsureUser: %v", err)
+	}
+	if len(creds.Password) != 32 { // 16 bytes hex = 32 chars
+		t.Errorf("generated password length = %d, want 32", len(creds.Password))
+	}
+}
+
+func TestCreateRoom(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/_matrix/client/v3/createRoom" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if auth := r.Header.Get("Authorization"); auth != "Bearer creator-token" {
+			t.Errorf("Authorization = %q, want Bearer creator-token", auth)
+		}
+
+		var body map[string]interface{}
+		json.NewDecoder(r.Body).Decode(&body)
+
+		if body["preset"] != "trusted_private_chat" {
+			t.Errorf("preset = %v, want trusted_private_chat", body["preset"])
+		}
+
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{
+			"room_id": "!room123:test.domain",
+		})
+	}))
+	defer server.Close()
+
+	c := NewTuwunelClient(Config{
+		ServerURL: server.URL,
+		Domain:    "test.domain",
+	}, server.Client())
+
+	info, err := c.CreateRoom(context.Background(), CreateRoomRequest{
+		Name:         "Worker: alice",
+		Topic:        "Communication channel",
+		Invite:       []string{"@admin:test.domain", "@alice:test.domain"},
+		CreatorToken: "creator-token",
+		PowerLevels: map[string]int{
+			"@admin:test.domain": 100,
+			"@alice:test.domain": 0,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateRoom: %v", err)
+	}
+	if !info.Created {
+		t.Error("expected Created=true")
+	}
+	if info.RoomID != "!room123:test.domain" {
+		t.Errorf("RoomID = %q, want !room123:test.domain", info.RoomID)
+	}
+}
+
+func TestCreateRoom_ExistingRoomID(t *testing.T) {
+	c := NewTuwunelClient(Config{ServerURL: "http://unused", Domain: "d"}, nil)
+	info, err := c.CreateRoom(context.Background(), CreateRoomRequest{
+		ExistingRoomID: "!existing:domain",
+	})
+	if err != nil {
+		t.Fatalf("CreateRoom: %v", err)
+	}
+	if info.Created {
+		t.Error("expected Created=false for existing room ID")
+	}
+	if info.RoomID != "!existing:domain" {
+		t.Errorf("RoomID = %q, want !existing:domain", info.RoomID)
+	}
+}
+
+func TestUserID(t *testing.T) {
+	c := NewTuwunelClient(Config{Domain: "matrix.example.com:8080"}, nil)
+	got := c.UserID("alice")
+	want := "@alice:matrix.example.com:8080"
+	if got != want {
+		t.Errorf("UserID = %q, want %q", got, want)
+	}
+}
+
+func TestGeneratePassword(t *testing.T) {
+	p1, err := GeneratePassword(16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p1) != 32 {
+		t.Errorf("len = %d, want 32", len(p1))
+	}
+
+	p2, _ := GeneratePassword(16)
+	if p1 == p2 {
+		t.Error("two generated passwords should not be equal")
+	}
+}
