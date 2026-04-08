@@ -685,7 +685,19 @@ type ManagerStatus struct {
 }
 ```
 
+
 ### 6.2 DebugWorker CRD
+
+#### 6.2.1 设计目标
+
+DebugWorker 是一个按需创建的诊断 Agent，用于在 K8s 环境下对 Team 或独立 Worker 进行问题排查。它的核心价值：
+
+1. 以 Agent 身份加入目标 Team/Worker 的 Matrix 房间，实时观察对话和行为
+2. 访问目标 Agent 的 OSS 工作目录（session 日志、state、memory、配置）
+3. 内置 hiclaw 源码，可结合代码分析 Agent 行为异常的根因
+4. 由 Team Leader 通过 skill 自助创建，无需 Admin 介入
+
+#### 6.2.2 CRD 定义
 
 ```yaml
 apiVersion: hiclaw.io/v1beta1
@@ -693,22 +705,34 @@ kind: DebugWorker
 metadata:
   name: debug-alpha-team
 spec:
-  target:                            # 调试目标
-    type: team                       # team | worker
-    name: alpha-team                 # Team 或 Worker 名称
-  hiclawVersion: v1.1.0             # 内置的 hiclaw 代码版本（用于代码分析）
-  retention: 72h                     # 自动清理时间（0 表示不自动清理）
+  targets:
+  - alpha-lead
+  - alpha-dev
+  - alpha-qa
+  credentials:                         # Team Leader 的 Matrix 凭证（用于加入房间和导出消息）
+    matrixUser: alpha-lead             # Team Leader 的 Matrix 用户名
+    matrixPasswordSecret:              # 引用 K8s Secret 中存储的 Matrix 密码
+      name: hiclaw-debug-alpha-team    # Secret 名称
+      key: matrix-password             # Secret key
+  hiclawVersion: v1.1.0               # 内置的 hiclaw 代码版本（用于代码分析）
+  model: qwen3.5-plus                 # DebugWorker 使用的 LLM 模型
+  retention: 72h                       # 自动清理时间（0 = 不自动清理）
   accessControl:
-    allowedUsers:                    # 允许与 DebugWorker 对话的用户
-      - admin                        # 默认只有 admin
+    allowedUsers:                      # 允许与 DebugWorker 对话的 Matrix 用户
+      - admin
 status:
-  phase: Running
+  phase: Running                       # Pending | Running | Stopped | Failed
   matrixUserID: "@debug-alpha-team:domain"
   roomID: "!debug-room:domain"
-  mountedWorkspaces:                 # 实时挂载的工作目录
-    - worker: alpha-lead
+  joinedRooms:                         # DebugWorker 已加入的目标房间
+    - roomID: "!team-room:domain"
+      name: "Team: alpha-team"
+    - roomID: "!worker-alpha-dev:domain"
+      name: "Worker: alpha-dev"
+  mountedWorkspaces:
+    - agent: alpha-lead
       ossPath: "hiclaw/hiclaw-storage/agents/alpha-lead/"
-    - worker: alpha-dev
+    - agent: alpha-dev
       ossPath: "hiclaw/hiclaw-storage/agents/alpha-dev/"
   message: "Ready for debugging"
 ```
@@ -722,15 +746,22 @@ type DebugWorker struct {
 }
 
 type DebugWorkerSpec struct {
-    Target         DebugTarget        `json:"target"`
-    HiclawVersion  string             `json:"hiclawVersion,omitempty"`
-    Retention      string             `json:"retention,omitempty"`      // default: 72h, "0" = no auto-cleanup
-    AccessControl  DebugAccessControl `json:"accessControl,omitempty"`
+    Targets         []string               `json:"target"`
+    Credentials    DebugCredentials       `json:"credentials"`
+    HiclawVersion  string                 `json:"hiclawVersion"`
+    Model          string                 `json:"model,omitempty"`
+    Retention      string                 `json:"retention,omitempty"`
+    AccessControl  DebugAccessControl     `json:"accessControl,omitempty"`
 }
 
-type DebugTarget struct {
-    Type string `json:"type"` // team | worker
+type DebugCredentials struct {
+    MatrixUser           string       `json:"matrixUser"`
+    MatrixPasswordSecret SecretKeyRef `json:"matrixPasswordSecret"`
+}
+
+type SecretKeyRef struct {
     Name string `json:"name"`
+    Key  string `json:"key"`
 }
 
 type DebugAccessControl struct {
@@ -741,196 +772,535 @@ type DebugWorkerStatus struct {
     Phase             string              `json:"phase,omitempty"`
     MatrixUserID      string              `json:"matrixUserID,omitempty"`
     RoomID            string              `json:"roomID,omitempty"`
+    JoinedRooms       []JoinedRoom        `json:"joinedRooms,omitempty"`
     MountedWorkspaces []MountedWorkspace  `json:"mountedWorkspaces,omitempty"`
     Message           string              `json:"message,omitempty"`
 }
 
+type JoinedRoom struct {
+    RoomID string `json:"roomID"`
+    Name   string `json:"name"`
+}
+
 type MountedWorkspace struct {
-    Worker  string `json:"worker"`
+    Agent   string `json:"agent"`
     OSSPath string `json:"ossPath"`
 }
 ```
 
-### 6.3 DebugWorker 核心设计
+#### 6.2.3 K8s 实施方案：Reconciler 流程
 
-DebugWorker 的核心能力是实时访问调试目标的所有成员工作目录，并通过内置的 debug skill 生成调试日志、结合源码分析问题。
-
-工作目录实时挂载：
+DebugWorkerReconciler 在 K8s 场景下的完整创建流程：
 
 ```
-DebugWorker 容器内的目录结构：
+┌─────────────────────────────────────────────────────────────────────┐
+│  DebugWorker Reconcile 流程                                         │
+│                                                                     │
+│  1. 读取 spec.credentials.matrixPasswordSecret → 获取 Leader 密码   │
+│  2. 用 Leader 凭证登录 Matrix → 获取 access_token                   │
+│  3. 通过 Leader token 查询目标 agents 的 room_id 列表               │
+│  4. 注册 DebugWorker 自己的 Matrix 账号                              │
+│  5. 创建 Debug Room，邀请 allowedUsers + DebugWorker                │
+│  6. 用 Leader token 邀请 DebugWorker 进入各目标房间                  │
+│  7. 为每个目标 agent 配置 OSS mirror（只读同步到本地）               │
+│  8. 创建 DebugWorker Pod（K8sBackend）                              │
+│  9. 更新 Status（joinedRooms, mountedWorkspaces）                   │
+│  10. 如果 retention > 0，创建 CronJob 定时清理                      │
+└─────────────────────────────────────────────────────────────────────┘
+```
 
+```go
+func (r *DebugWorkerReconciler) handleCreate(ctx context.Context, dw *DebugWorker) error {
+    // ── Step 1: 从 K8s Secret 读取 Team Leader 的 Matrix 密码 ──
+    leaderPassword, err := r.readSecretKey(ctx,
+        dw.Namespace,
+        dw.Spec.Credentials.MatrixPasswordSecret.Name,
+        dw.Spec.Credentials.MatrixPasswordSecret.Key,
+    )
+    if err != nil {
+        return fmt.Errorf("failed to read leader matrix password: %w", err)
+    }
+
+    // ── Step 2: 用 Leader 凭证登录 Matrix ──
+    leaderToken, err := r.Matrix.Login(ctx,
+        dw.Spec.Credentials.MatrixUser,
+        leaderPassword,
+    )
+    if err != nil {
+        return fmt.Errorf("leader matrix login failed: %w", err)
+    }
+
+    // ── Step 3: 查询目标 agents 的 room_id ──
+    // 从 Worker CRD status 中获取（K8s 模式）
+    targetRooms := []JoinedRoom{}
+    for _, agentName := range dw.Spec.Target.Agents {
+        var workerCRD Worker
+        if err := r.Get(ctx, types.NamespacedName{
+            Name: agentName, Namespace: dw.Namespace,
+        }, &workerCRD); err == nil {
+            if workerCRD.Status.RoomID != "" {
+                targetRooms = append(targetRooms, JoinedRoom{
+                    RoomID: workerCRD.Status.RoomID,
+                    Name:   fmt.Sprintf("Worker: %s", agentName),
+                })
+            }
+        }
+    }
+    // 如果是 Team，还要加入 Team Room
+    if dw.Spec.Target.Type == "team" {
+        var teamCRD Team
+        if err := r.Get(ctx, types.NamespacedName{
+            Name: dw.Spec.Target.Name, Namespace: dw.Namespace,
+        }, &teamCRD); err == nil {
+            if teamCRD.Status.TeamRoomID != "" {
+                targetRooms = append(targetRooms, JoinedRoom{
+                    RoomID: teamCRD.Status.TeamRoomID,
+                    Name:   fmt.Sprintf("Team: %s", dw.Spec.Target.Name),
+                })
+            }
+        }
+    }
+
+    // ── Step 4: 注册 DebugWorker 的 Matrix 账号 ──
+    debugUser, err := r.Matrix.RegisterUser(ctx, dw.Name)
+    if err != nil {
+        return fmt.Errorf("failed to register debug matrix user: %w", err)
+    }
+
+    // ── Step 5: 创建 Debug Room ──
+    inviteList := []string{debugUser.UserID}
+    for _, u := range dw.Spec.AccessControl.AllowedUsers {
+        inviteList = append(inviteList, r.Matrix.ResolveUserID(u))
+    }
+    debugRoomID, err := r.Matrix.CreateRoom(ctx, CreateRoomRequest{
+        Name:   fmt.Sprintf("Debug: %s", dw.Name),
+        Invite: inviteList,
+    })
+
+    // ── Step 6: 用 Leader token 邀请 DebugWorker 进入目标房间 ──
+    // Leader 在目标房间有 power_level 100，可以邀请新成员
+    for _, room := range targetRooms {
+        err := r.Matrix.InviteUserAs(ctx, leaderToken, room.RoomID, debugUser.UserID)
+        if err != nil {
+            r.Log.Error(err, "failed to invite debug worker to room",
+                "room", room.RoomID, "debugWorker", dw.Name)
+        }
+        // DebugWorker 自动 accept invite
+        r.Matrix.JoinRoomAs(ctx, debugUser.Token, room.RoomID)
+    }
+
+    // ── Step 7: 构建 OSS mirror 配置 ──
+    mountedWorkspaces := []MountedWorkspace{}
+    for _, agentName := range dw.Spec.Target.Agents {
+        mountedWorkspaces = append(mountedWorkspaces, MountedWorkspace{
+            Agent:   agentName,
+            OSSPath: fmt.Sprintf("%s/agents/%s/", r.OSSPrefix, agentName),
+        })
+    }
+
+    // ── Step 8: 创建 DebugWorker Pod ──
+    instance, err := r.Backend.Create(ctx, CreateWorkerRequest{
+        Name:    debugPodName(dw.Name),
+        Image:   fmt.Sprintf("%s:%s", r.DebugWorkerImageRepo, dw.Spec.HiclawVersion),
+        Runtime: "openclaw",
+        Env: map[string]string{
+            "HICLAW_WORKER_NAME":       dw.Name,
+            "HICLAW_DEBUG_TARGET_TYPE": dw.Spec.Target.Type,
+            "HICLAW_DEBUG_TARGET_NAME": dw.Spec.Target.Name,
+            "HICLAW_DEBUG_AGENTS":      strings.Join(dw.Spec.Target.Agents, ","),
+            "HICLAW_SOURCE_VERSION":    dw.Spec.HiclawVersion,
+        },
+        Labels: map[string]string{
+            "hiclaw.io/component":    "debug-worker",
+            "hiclaw.io/debug-target": dw.Spec.Target.Name,
+        },
+    })
+
+    // ── Step 9: 更新 Status ──
+    dw.Status.Phase = "Running"
+    dw.Status.MatrixUserID = debugUser.UserID
+    dw.Status.RoomID = debugRoomID
+    dw.Status.JoinedRooms = targetRooms
+    dw.Status.MountedWorkspaces = mountedWorkspaces
+    return r.Status().Update(ctx, dw)
+}
+```
+
+#### 6.2.4 K8s Pod 规格
+
+DebugWorker 在 K8s 中以普通 Pod 运行，由 controller 的 K8sBackend 创建：
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: hiclaw-debug-alpha-team
+  namespace: hiclaw
+  labels:
+    hiclaw.io/component: debug-worker
+    hiclaw.io/debug-target: alpha-team
+    hiclaw.io/managed-by: hiclaw-controller
+spec:
+  serviceAccountName: hiclaw-debug-sa   # 只读权限，仅能读取 CRD status
+  containers:
+    - name: debug-worker
+      image: hiclaw/debug-worker:v1.1.0
+      env:
+        - name: HICLAW_WORKER_NAME
+          value: "debug-alpha-team"
+        - name: HICLAW_DEBUG_TARGET_TYPE
+          value: "team"
+        - name: HICLAW_DEBUG_TARGET_NAME
+          value: "alpha-team"
+        - name: HICLAW_DEBUG_AGENTS
+          value: "alpha-lead,alpha-dev,alpha-qa"
+        - name: HICLAW_SOURCE_VERSION
+          value: "v1.1.0"
+        # OSS 凭证（通过 Orchestrator STS 或 envFrom Secret）
+        - name: HICLAW_FS_ENDPOINT
+          valueFrom:
+            secretKeyRef:
+              name: hiclaw-runtime-env
+              key: HICLAW_FS_ENDPOINT
+        # Matrix 凭证（DebugWorker 自己的，由 controller 注入）
+        - name: HICLAW_MATRIX_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hiclaw-debug-alpha-team-creds
+              key: matrix-token
+      resources:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+        limits:
+          cpu: 500m
+          memory: 512Mi
+  restartPolicy: Never                  # DebugWorker 不自动重启
+```
+
+#### 6.2.5 DebugWorker 容器内部结构
+
+```
 /root/debug/
-├── workspaces/                      # 实时同步的目标成员工作目录（通过 mc mirror）
-│   ├── alpha-lead/                  # Team Leader 的完整工作目录
+├── workspaces/                        # 实时同步的目标 Agent 工作目录（mc mirror，只读）
+│   ├── alpha-lead/                    # Team Leader 的完整工作目录
 │   │   ├── SOUL.md
 │   │   ├── AGENTS.md
 │   │   ├── team-state.json
 │   │   ├── skills/
-│   │   ├── sessions/                # LLM 请求/响应日志
+│   │   ├── .openclaw/agents/*/        # LLM session 日志（JSON Lines）
 │   │   └── memory/
-│   ├── alpha-dev/                   # Worker 的完整工作目录
+│   ├── alpha-dev/
 │   │   ├── SOUL.md
 │   │   ├── openclaw.json
 │   │   ├── skills/
-│   │   ├── sessions/
+│   │   ├── .openclaw/agents/*/
 │   │   └── memory/
 │   └── alpha-qa/
 │       └── ...
-├── matrix-export/                   # Matrix 消息导出（按需生成）
+├── matrix-export/                     # Matrix 消息导出（按需生成）
 │   ├── team-room.json
 │   ├── alpha-lead-room.json
 │   └── alpha-dev-room.json
-├── hiclaw-source/                   # hiclaw 指定版本的源码
-│   ├── manager/
-│   ├── hiclaw-controller/
+├── hiclaw-source/                     # hiclaw 指定版本的完整源码
+│   ├── manager/agent/
+│   ├── hiclaw-controller/internal/
+│   ├── worker/
 │   └── ...
-└── output/                          # debug skill 生成的分析报告
+└── output/                            # debug skill 生成的分析报告
     └── debug-report-20260403.md
 ```
 
-### 6.4 DebugWorker 内置 Debug Skill
+容器启动脚本（`debug-worker-entrypoint.sh`）：
 
-DebugWorker 自带一个专门的 `debug-analysis` skill，用于生成调试日志并结合代码分析：
+```bash
+#!/bin/bash
+set -e
+
+# 1. 解析目标 Agent 列表
+IFS=',' read -ra AGENTS <<< "${HICLAW_DEBUG_AGENTS}"
+
+# 2. 为每个目标 Agent 启动 mc mirror 后台同步（只读，每 30s）
+for agent in "${AGENTS[@]}"; do
+    (
+        while true; do
+            mc mirror "${HICLAW_STORAGE_PREFIX}/agents/${agent}/" \
+                "/root/debug/workspaces/${agent}/" --overwrite 2>/dev/null || true
+            sleep 30
+        done
+    ) &
+done
+
+# 3. 下载 hiclaw 指定版本源码
+if [ -n "${HICLAW_SOURCE_VERSION}" ]; then
+    git clone --depth 1 --branch "${HICLAW_SOURCE_VERSION}" \
+        https://github.com/agentscope-ai/HiClaw.git \
+        /root/debug/hiclaw-source 2>/dev/null || true
+fi
+
+# 4. 启动 Agent Runtime（OpenClaw），加载 debug-analysis skill
+exec openclaw gateway run --verbose --force
+```
+
+#### 6.2.6 DebugWorker 内置 Skill：debug-analysis
+
+DebugWorker 自带 `debug-analysis` skill，用于生成调试日志并结合代码分析：
 
 ```markdown
 ---
 name: debug-analysis
-description: Use when you need to generate debug logs, export Matrix messages,
-  analyze LLM session logs, or investigate issues by cross-referencing with hiclaw source code.
+description: |
+  Use when you need to investigate issues with team workers. You can export Matrix
+  messages, analyze LLM session logs, inspect agent state, and cross-reference
+  with hiclaw source code to find root causes.
 ---
 
 # Debug Analysis Skill
 
+You are a DebugWorker. Your job is to help the admin investigate issues with the
+target agents. You have real-time access to their workspaces and can read all their
+files, session logs, and Matrix messages.
+
+## Workspace Access
+
+All target agents' workspaces are live-synced at `/root/debug/workspaces/<agent-name>/`.
+
+Key files to inspect:
+- `.openclaw/agents/*/sessions/*.jsonl` — LLM request/response session logs
+- `team-state.json` / `state.json` — Task tracking state
+- `memory/` — Agent memory and context files
+- `openclaw.json` — Runtime configuration (model, channels, plugins)
+- `SOUL.md` / `AGENTS.md` — Agent identity and behavior rules
+- `skills/` — Installed skills and their scripts
+
 ## Available Commands
 
 ### Export Matrix Messages
-Export recent Matrix room messages for a specific worker or the team room.
-
-
 bash ./skills/debug-analysis/scripts/export-matrix-messages.sh \
-  --worker alpha-dev \
-  --hours 24 \
+  --room-id '!roomid:domain' --hours 24 \
   --output /root/debug/matrix-export/alpha-dev-room.json
 
-
-### Generate Debug Log
-Aggregate session logs, Matrix messages, and state files into a structured debug report.
-
+### Generate Debug Report
 bash ./skills/debug-analysis/scripts/generate-debug-log.sh \
-  --worker alpha-dev \
-  --hours 24 \
-  --include-sessions \
-  --include-matrix \
-  --include-state \
+  --agent alpha-dev --hours 24 \
+  --include-sessions --include-matrix --include-state \
   --output /root/debug/output/debug-report.md
 
-### Analyze with Source Code
-The hiclaw source code is available at `/root/debug/hiclaw-source/`.
-When investigating issues, cross-reference:
-- Agent behavior rules: `manager/agent/*/AGENTS.md`
-- Skill implementations: `manager/agent/skills/*/`
-- Controller reconcile logic: `hiclaw-controller/internal/controller/`
-- Worker config generation: `hiclaw-controller/internal/executor/`
+## Source Code Reference
 
-## Workspace Access
-All target workers' workspaces are live-synced at `/root/debug/workspaces/<worker-name>/`.
-You can directly read any file to understand current state:
-- `sessions/` — LLM request/response logs (JSON)
-- `team-state.json` / `state.json` — Task tracking state
-- `memory/` — Agent memory files
-- `openclaw.json` / `copaw.json` — Runtime configuration
+The hiclaw source code is at `/root/debug/hiclaw-source/`. Cross-reference when
+investigating behavioral issues:
+- Agent behavior rules: `manager/agent/*/AGENTS.md`, `manager/agent/*/SOUL.md`
+- Skill implementations: `manager/agent/skills/*/SKILL.md`
+- Team Leader logic: `manager/agent/team-leader-agent/skills/*/`
+- Controller reconcile: `hiclaw-controller/internal/controller/`
+- Worker entrypoint: `worker/scripts/worker-entrypoint.sh`
 ```
 
-### 6.5 DebugWorker Reconciler 逻辑
+#### 6.2.7 Team Leader 的 debug-worker-management Skill
 
-```go
-func (r *DebugWorkerReconciler) handleCreate(ctx context.Context, dw *DebugWorker) error {
-    // 1. 解析调试目标，获取所有成员的 OSS 路径和 Matrix 凭证
-    members := r.resolveTargetMembers(ctx, dw.Spec.Target)
-    // team → leader + all workers
-    // worker → single worker
+Team Leader 通过内置的 `debug-worker-management` skill 自助创建和管理 DebugWorker，无需 Admin 介入。
 
-    // 2. 创建 DebugWorker 的 Matrix 账号
-    matrixUser, _ := r.Matrix.RegisterUser(ctx, dw.Name)
+Skill 目录结构（位于 `manager/agent/team-leader-agent/skills/debug-worker-management/`）：
 
-    // 3. 创建 Debug Room，邀请 allowedUsers
-    roomID, _ := r.Matrix.CreateRoom(ctx, CreateRoomRequest{
-        Name:   fmt.Sprintf("debug-%s", dw.Name),
-        Invite: append(dw.Spec.AccessControl.AllowedUsers, matrixUser.UserID),
-    })
-
-    // 4. 准备 mc mirror 配置：为每个目标成员配置实时同步
-    mirrorConfigs := []MirrorConfig{}
-    mountedWorkspaces := []MountedWorkspace{}
-    for _, member := range members {
-        mirrorConfigs = append(mirrorConfigs, MirrorConfig{
-            Source: member.OSSAgentPath,  // e.g., hiclaw/hiclaw-storage/agents/alpha-dev/
-            Dest:   fmt.Sprintf("/root/debug/workspaces/%s/", member.Name),
-        })
-        mountedWorkspaces = append(mountedWorkspaces, MountedWorkspace{
-            Worker:  member.Name,
-            OSSPath: member.OSSAgentPath,
-        })
-    }
-
-    // 5. 创建 DebugWorker 容器
-    //    - 内置 hiclaw 指定版本的源码
-    //    - 内置 debug-analysis skill
-    //    - 配置 mc mirror 实时同步目标工作目录
-    //    - 注入目标成员的 Matrix 凭证（用于导出消息）
-    instance, _ := r.Backend.Create(ctx, CreateWorkerRequest{
-        Name:  debugContainerName(dw.Name),
-        Image: fmt.Sprintf("hiclaw/debug-worker:%s", dw.Spec.HiclawVersion),
-        Env: map[string]string{
-            "DEBUG_TARGET_TYPE":     dw.Spec.Target.Type,
-            "DEBUG_TARGET_NAME":     dw.Spec.Target.Name,
-            "HICLAW_SOURCE_VERSION": dw.Spec.HiclawVersion,
-            "MIRROR_CONFIGS":        encodeMirrorConfigs(mirrorConfigs),
-            "TARGET_MATRIX_CREDS":   encodeMatrixCreds(members), // 用于导出消息
-        },
-    })
-
-    // 6. 更新 Status
-    dw.Status.Phase = "Running"
-    dw.Status.MatrixUserID = matrixUser.UserID
-    dw.Status.RoomID = roomID
-    dw.Status.MountedWorkspaces = mountedWorkspaces
-
-    // 7. 设置自动清理定时器
-    if dw.Spec.Retention != "" && dw.Spec.Retention != "0" {
-        r.scheduleCleanup(ctx, dw)
-    }
-
-    return nil
-}
+```
+debug-worker-management/
+├── SKILL.md
+└── scripts/
+    ├── create-debug-worker.sh
+    └── delete-debug-worker.sh
 ```
 
-DebugWorker 容器启动后，内部运行 mc mirror 持续同步目标成员的 OSS 工作目录到本地，用户（admin/team admin）通过 Matrix 与 DebugWorker 对话，DebugWorker 利用 debug-analysis skill 读取实时数据、导出日志、结合源码分析问题。
+SKILL.md：
 
-### 6.6 Team 默认 DebugWorker
+```markdown
+---
+name: debug-worker-management
+description: |
+  Use when you need to create a DebugWorker to investigate issues with your team
+  members. The DebugWorker will join all team rooms and have access to all agent
+  workspaces for debugging.
+---
 
-每个 Team 可配置默认自带一个 DebugWorker：
+# Debug Worker Management
+
+You can create a DebugWorker to help investigate issues with your team.
+
+## Create DebugWorker
+
+When a team member is behaving unexpectedly, or you need to investigate task
+failures, create a DebugWorker:
+
+bash ./skills/debug-worker-management/scripts/create-debug-worker.sh \
+  --team "${HICLAW_TEAM_NAME}" \
+  --version "${HICLAW_VERSION:-latest}"
+
+The script will:
+1. Create a K8s Secret with your Matrix credentials
+2. Apply a DebugWorker CRD targeting your team
+3. Wait for the DebugWorker to be ready
+4. Report the Debug Room ID so admin can interact with it
+
+## Delete DebugWorker
+
+When debugging is complete:
+
+bash ./skills/debug-worker-management/scripts/delete-debug-worker.sh \
+  --team "${HICLAW_TEAM_NAME}"
+```
+
+`create-debug-worker.sh` 核心实现：
+
+```bash
+#!/bin/bash
+# create-debug-worker.sh — Team Leader 创建 DebugWorker
+set -e
+
+TEAM_NAME=""
+HICLAW_VERSION="${HICLAW_VERSION:-latest}"
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --team)    TEAM_NAME="$2"; shift 2 ;;
+        --version) HICLAW_VERSION="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+
+LEADER_NAME="${HICLAW_WORKER_NAME}"  # Team Leader 自身名称（环境变量）
+DEBUG_NAME="debug-${TEAM_NAME}"
+SECRET_NAME="hiclaw-${DEBUG_NAME}"
+NAMESPACE="${HICLAW_K8S_NAMESPACE:-hiclaw}"
+
+# 1. 从 OSS 读取 Leader 的 Matrix 密码
+LEADER_PASSWORD=$(mc cat \
+    "${HICLAW_STORAGE_PREFIX}/agents/${LEADER_NAME}/credentials/matrix/password" 2>/dev/null)
+
+# 2. 从 workers-registry.json 获取 Team 成员列表
+AGENTS_LIST=$(jq -r --arg t "${TEAM_NAME}" '
+    [.workers | to_entries[] | select(.value.team_id == $t) | .key] | join(",")
+' "${HOME}/workers-registry.json" 2>/dev/null)
+
+# 3. 创建 K8s Secret（存储 Leader Matrix 密码）
+hiclaw kubectl create secret generic "${SECRET_NAME}" \
+    --namespace "${NAMESPACE}" \
+    --from-literal=matrix-password="${LEADER_PASSWORD}" \
+    --dry-run=client -o yaml | hiclaw kubectl apply -f -
+
+# 4. 生成并 apply DebugWorker CRD
+IFS=',' read -ra AGENT_ARR <<< "${AGENTS_LIST}"
+AGENTS_YAML=""
+for agent in "${AGENT_ARR[@]}"; do
+    AGENTS_YAML="${AGENTS_YAML}
+      - ${agent}"
+done
+
+cat <<EOF | hiclaw apply -f -
+apiVersion: hiclaw.io/v1beta1
+kind: DebugWorker
+metadata:
+  name: ${DEBUG_NAME}
+spec:
+  target:
+    type: team
+    name: ${TEAM_NAME}
+    agents:${AGENTS_YAML}
+  credentials:
+    matrixUser: ${LEADER_NAME}
+    matrixPasswordSecret:
+      name: ${SECRET_NAME}
+      key: matrix-password
+  hiclawVersion: ${HICLAW_VERSION}
+  model: qwen3.5-plus
+  retention: 72h
+  accessControl:
+    allowedUsers:
+      - admin
+EOF
+
+# 5. 等待 DebugWorker 就绪
+for i in $(seq 1 30); do
+    PHASE=$(hiclaw get debugworker "${DEBUG_NAME}" -o json 2>/dev/null \
+        | jq -r '.status.phase // "Pending"')
+    if [ "${PHASE}" = "Running" ]; then
+        ROOM_ID=$(hiclaw get debugworker "${DEBUG_NAME}" -o json \
+            | jq -r '.status.roomID // empty')
+        echo '{"status":"ready","debugWorker":"'"${DEBUG_NAME}"'","roomID":"'"${ROOM_ID}"'"}'
+        exit 0
+    fi
+    sleep 10
+done
+echo '{"status":"timeout","debugWorker":"'"${DEBUG_NAME}"'"}'
+exit 1
+```
+
+#### 6.2.8 K8s RBAC 与安全
+
+DebugWorker 相关的 RBAC 权限分为两层：
+
+1. hiclaw-controller 需要的权限（在 ClusterRole 中追加）：
 
 ```yaml
-apiVersion: hiclaw.io/v1beta1
-kind: Team
-metadata:
-  name: alpha-team
-spec:
-  leader:
-    name: alpha-lead
-    model: claude-sonnet-4-6
-  workers:
-    - name: alpha-dev
-      model: qwen3.5-plus
-  debug:                             # 新增：Team 级 Debug 配置
-    enabled: true                    # 默认创建 DebugWorker
-    accessControl:
-      allowedUsers: [admin]          # 默认只有 Team Admin 有权限
+- apiGroups: ["hiclaw.io"]
+  resources: ["debugworkers", "debugworkers/status"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get"]  # 读取 Leader Matrix 密码 Secret
 ```
 
-TeamReconciler 在创建 Team 时，如果 `spec.debug.enabled=true`，自动创建对应的 DebugWorker CRD。
+2. DebugWorker Pod 自身的权限（只读，最小化）：
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: hiclaw-debug-reader
+  namespace: hiclaw
+rules:
+  - apiGroups: ["hiclaw.io"]
+    resources: ["workers", "teams"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+```
+
+安全约束：
+- Leader 的 Matrix 密码通过 K8s Secret 传递，controller 读取后注入 Pod 环境变量，Pod 内不持久化到磁盘
+- DebugWorker 对 OSS 的访问是只读的（mc mirror 单向同步）
+- `retention` 机制确保 DebugWorker 不会无限期运行，controller 通过 TTL 定时清理
+- `accessControl.allowedUsers` 限制谁能与 DebugWorker 对话
+- DebugWorker Pod 使用独立的 ServiceAccount，权限最小化
+
+#### 6.2.9 DebugWorker 生命周期
+
+```
+                    ┌─────────┐
+     CRD created    │ Pending │
+    ──────────────> └────┬────┘
+                         │ controller reconcile
+                         │ (register Matrix, join rooms, create Pod)
+                         v
+                    ┌─────────┐
+                    │ Running │ ◄──── admin 通过 Debug Room 交互
+                    └────┬────┘
+                         │
+              ┌──────────┼──────────┐
+              │                     │
+         retention 到期         手动删除
+         (controller TTL)    (hiclaw delete / Leader skill)
+              │                     │
+              v                     v
+         ┌──────────┐         ┌──────────┐
+         │ 清理资源  │         │ 清理资源  │
+         │ - 删除 Pod│         │ - 删除 Pod│
+         │ - 退出房间│         │ - 退出房间│
+         │ - 删除 Secret      │ - 删除 Secret
+         │ - 删除 CRD│         │ - 删除 CRD│
+         └──────────┘         └──────────┘
+```
+
 
 ## 7. K8s 部署与 Helm Chart
 
@@ -1622,3 +1992,4 @@ hiclaw version                      # 各组件版本信息
 | Team Leader quota 绕过 | 资源超限 | Controller 端强制检查，Leader 的 hiclaw CLI 无法绕过 |
 | DebugWorker 数据安全 | 敏感信息泄露 | accessControl 严格限制，retention 自动清理，仅 admin/team admin 可访问 |
 | embedded 模式 controller 容器拆分 | 部署复杂度增加 | Docker Compose 编排，install 脚本自动处理容器间网络和依赖 |
+
