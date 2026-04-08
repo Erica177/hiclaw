@@ -1,6 +1,8 @@
 package agentconfig
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -30,8 +32,6 @@ func (g *Generator) GenerateOpenClawConfig(req WorkerConfigRequest) ([]byte, err
 	}
 	modelName = strings.TrimPrefix(modelName, "hiclaw-gateway/")
 
-	spec := g.resolveModelSpec(modelName)
-
 	matrixServerURL := g.config.MatrixServerURL
 	if matrixServerURL == "" {
 		// K8s deployments must set HICLAW_MATRIX_URL (Helm injects it automatically).
@@ -53,29 +53,58 @@ func (g *Generator) GenerateOpenClawConfig(req WorkerConfigRequest) ([]byte, err
 	adminUser := g.config.AdminUser
 	adminMatrixID := fmt.Sprintf("@%s:%s", adminUser, matrixDomain)
 
-	// Build the base openclaw.json structure
+	// Build the base openclaw.json structure (must match OpenClaw schema)
 	config := map[string]interface{}{
+		"gateway": map[string]interface{}{
+			"mode": "local",
+			"port": 18800,
+			"auth": map[string]interface{}{
+				"token": generateRandomHex(32),
+			},
+			"remote": map[string]interface{}{
+				"token": generateRandomHex(32),
+			},
+		},
 		"channels": map[string]interface{}{
 			"matrix": g.buildMatrixChannelConfig(req, matrixServerURL, matrixDomain, adminMatrixID),
 		},
 		"models": map[string]interface{}{
-			"default": "hiclaw-gateway/" + modelName,
+			"mode": "merge",
 			"providers": map[string]interface{}{
 				"hiclaw-gateway": map[string]interface{}{
-					"type":   "openai",
-					"apiKey": req.GatewayKey,
-					"url":    aiGatewayURL + "/v1",
-					"models": []ModelSpec{spec},
+					"baseUrl": aiGatewayURL + "/v1",
+					"apiKey":  req.GatewayKey,
+					"api":     "openai-completions",
+					"models":  g.allModelSpecs(modelName),
 				},
 			},
 		},
 		"agents": map[string]interface{}{
 			"defaults": map[string]interface{}{
-				"models": map[string]interface{}{
-					"hiclaw-gateway/" + modelName: map[string]interface{}{
-						"alias": modelName,
-					},
+				"timeoutSeconds": 1800,
+				"workspace":      "~",
+				"model": map[string]interface{}{
+					"primary": "hiclaw-gateway/" + modelName,
 				},
+				"models":       g.allModelAliases(modelName),
+				"maxConcurrent": 4,
+				"subagents": map[string]interface{}{
+					"maxConcurrent": 8,
+				},
+			},
+		},
+		"session": map[string]interface{}{
+			"resetByType": map[string]interface{}{
+				"dm":    map[string]interface{}{"mode": "daily", "atHour": 4},
+				"group": map[string]interface{}{"mode": "daily", "atHour": 4},
+			},
+		},
+		"plugins": map[string]interface{}{
+			"load": map[string]interface{}{
+				"paths": []string{"/opt/openclaw/extensions/matrix"},
+			},
+			"entries": map[string]interface{}{
+				"matrix": map[string]interface{}{"enabled": true},
 			},
 		},
 	}
@@ -118,13 +147,19 @@ func (g *Generator) buildMatrixChannelConfig(req WorkerConfigRequest, serverURL,
 	}
 
 	cfg := map[string]interface{}{
-		"homeserverUrl": serverURL,
-		"userId":        workerMatrixID,
-		"accessToken":   req.MatrixToken,
-		"e2ee":          g.config.E2EEEnabled,
-		"groupAllowFrom": groupAllowFrom,
+		"homeserver":  serverURL,
+		"enabled":     true,
+		"userId":      workerMatrixID,
+		"accessToken": req.MatrixToken,
+		"encryption":  g.config.E2EEEnabled,
 		"dm": map[string]interface{}{
+			"policy":    "allowlist",
 			"allowFrom": dmAllowFrom,
+		},
+		"groupPolicy":    "allowlist",
+		"groupAllowFrom": groupAllowFrom,
+		"groups": map[string]interface{}{
+			"*": map[string]interface{}{"allow": true, "requireMention": true},
 		},
 	}
 
@@ -309,4 +344,56 @@ func containsString(slice []string, s string) bool {
 		}
 	}
 	return false
+}
+
+func generateRandomHex(n int) string {
+	b := make([]byte, n)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+// allModelSpecs returns all known model specs for the openclaw.json models list.
+func (g *Generator) allModelSpecs(selectedModel string) []ModelSpec {
+	allModels := []string{
+		"gpt-5.4", "gpt-5.3-codex", "gpt-5-mini", "gpt-5-nano",
+		"claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5",
+		"qwen3.5-plus",
+		"deepseek-chat", "deepseek-reasoner",
+		"kimi-k2.5", "glm-5",
+		"MiniMax-M2.7", "MiniMax-M2.7-highspeed", "MiniMax-M2.5",
+	}
+
+	specs := make([]ModelSpec, 0, len(allModels)+1)
+	seen := make(map[string]bool)
+	for _, name := range allModels {
+		specs = append(specs, g.resolveModelSpec(name))
+		seen[name] = true
+	}
+	// Add custom model if not in the built-in list
+	if !seen[selectedModel] {
+		specs = append(specs, g.resolveModelSpec(selectedModel))
+	}
+	return specs
+}
+
+// allModelAliases returns the agents.defaults.models alias map.
+func (g *Generator) allModelAliases(selectedModel string) map[string]interface{} {
+	allModels := []string{
+		"gpt-5.4", "gpt-5.3-codex", "gpt-5-mini", "gpt-5-nano",
+		"claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5",
+		"qwen3.5-plus",
+		"deepseek-chat", "deepseek-reasoner",
+		"kimi-k2.5", "glm-5",
+		"MiniMax-M2.7", "MiniMax-M2.7-highspeed", "MiniMax-M2.5",
+	}
+
+	aliases := make(map[string]interface{})
+	for _, name := range allModels {
+		aliases["hiclaw-gateway/"+name] = map[string]interface{}{"alias": name}
+	}
+	// Add custom model if not in the built-in list
+	if _, exists := aliases["hiclaw-gateway/"+selectedModel]; !exists {
+		aliases["hiclaw-gateway/"+selectedModel] = map[string]interface{}{"alias": selectedModel}
+	}
+	return aliases
 }

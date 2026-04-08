@@ -94,9 +94,9 @@ spec:
               value: "k8s"
             {{- /* K8s worker resource defaults */}}
             - name: HICLAW_K8S_WORKER_CPU
-              value: {{ .Values.worker.resources.requests.cpu | default "1000m" | quote }}
+              value: {{ .Values.worker.resources.limits.cpu | default "1000m" | quote }}
             - name: HICLAW_K8S_WORKER_MEMORY
-              value: {{ .Values.worker.resources.requests.memory | default "2Gi" | quote }}
+              value: {{ .Values.worker.resources.limits.memory | default "2Gi" | quote }}
             {{- /* Credential persistence */}}
             - name: HICLAW_CREDS_DIR
               value: "/data/worker-creds"

@@ -90,6 +90,10 @@ spec:
             status:
               type: object
               properties:
+                observedGeneration:
+                  type: integer
+                  format: int64
+                  description: Last spec generation reconciled by the controller
                 phase:
                   type: string
                   enum: [Pending, Running, Updating, Stopped, Failed]

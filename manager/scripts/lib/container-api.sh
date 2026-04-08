@@ -17,6 +17,18 @@
 CONTAINER_API_BASE="${HICLAW_CONTROLLER_URL:-http://localhost:8090}"
 WORKER_CONTAINER_PREFIX="hiclaw-worker-"
 
+# Resolve bearer token: projected SA token (K8s) > static API key > none
+_HICLAW_CONTROLLER_TOKEN=""
+_SA_TOKEN_FILE="/var/run/secrets/hiclaw/controller/token"
+_resolve_controller_token() {
+    # Re-read SA token each call (token is auto-rotated by kubelet)
+    if [ -f "${_SA_TOKEN_FILE}" ]; then
+        _HICLAW_CONTROLLER_TOKEN=$(cat "${_SA_TOKEN_FILE}")
+    elif [ -n "${HICLAW_CONTROLLER_API_KEY:-}" ]; then
+        _HICLAW_CONTROLLER_TOKEN="${HICLAW_CONTROLLER_API_KEY}"
+    fi
+}
+
 _log() {
     echo "[hiclaw-container $(date '+%Y-%m-%d %H:%M:%S')] $1"
 }
@@ -28,9 +40,10 @@ _log() {
 _orch_api() {
     local method="$1" path="$2" body="${3:-}"
     local url="${CONTAINER_API_BASE}${path}"
+    _resolve_controller_token
     local auth_args=()
-    if [ -n "${HICLAW_CONTROLLER_API_KEY:-}" ]; then
-        auth_args=(-H "Authorization: Bearer ${HICLAW_CONTROLLER_API_KEY}")
+    if [ -n "${_HICLAW_CONTROLLER_TOKEN}" ]; then
+        auth_args=(-H "Authorization: Bearer ${_HICLAW_CONTROLLER_TOKEN}")
     fi
     if [ -n "$body" ]; then
         curl -s -X "$method" "$url" "${auth_args[@]}" \
@@ -43,9 +56,10 @@ _orch_api() {
 _orch_api_code() {
     local method="$1" path="$2" body="${3:-}"
     local url="${CONTAINER_API_BASE}${path}"
+    _resolve_controller_token
     local auth_args=()
-    if [ -n "${HICLAW_CONTROLLER_API_KEY:-}" ]; then
-        auth_args=(-H "Authorization: Bearer ${HICLAW_CONTROLLER_API_KEY}")
+    if [ -n "${_HICLAW_CONTROLLER_TOKEN}" ]; then
+        auth_args=(-H "Authorization: Bearer ${_HICLAW_CONTROLLER_TOKEN}")
     fi
     if [ -n "$body" ]; then
         curl -s -o /dev/null -w '%{http_code}' -X "$method" "$url" "${auth_args[@]}" \
