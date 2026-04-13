@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	v1beta1 "github.com/hiclaw/hiclaw-controller/api/v1beta1"
+	authpkg "github.com/hiclaw/hiclaw-controller/internal/auth"
 	"github.com/hiclaw/hiclaw-controller/internal/httputil"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -52,6 +53,13 @@ func (h *ResourceHandler) CreateWorker(w http.ResponseWriter, r *http.Request) {
 			Expose:        req.Expose,
 			ChannelPolicy: req.ChannelPolicy,
 		},
+	}
+
+	caller := authpkg.CallerFromContext(r.Context())
+	if caller != nil && caller.Role == authpkg.RoleTeamLeader {
+		req.Team = caller.Team
+		req.Role = "worker"
+		req.TeamLeader = caller.Username
 	}
 
 	if req.Team != "" || req.Role != "" || req.TeamLeader != "" {
@@ -227,13 +235,15 @@ func (h *ResourceHandler) CreateTeam(w http.ResponseWriter, r *http.Request) {
 			PeerMentions:  req.PeerMentions,
 			ChannelPolicy: req.ChannelPolicy,
 			Leader: v1beta1.LeaderSpec{
-				Name:          req.Leader.Name,
-				Model:         req.Leader.Model,
-				Identity:      req.Leader.Identity,
-				Soul:          req.Leader.Soul,
-				Agents:        req.Leader.Agents,
-				Package:       req.Leader.Package,
-				ChannelPolicy: req.Leader.ChannelPolicy,
+				Name:              req.Leader.Name,
+				Model:             req.Leader.Model,
+				Identity:          req.Leader.Identity,
+				Soul:              req.Leader.Soul,
+				Agents:            req.Leader.Agents,
+				Package:           req.Leader.Package,
+				Heartbeat:         toHeartbeatSpec(req.Leader.Heartbeat),
+				WorkerIdleTimeout: req.Leader.WorkerIdleTimeout,
+				ChannelPolicy:     req.Leader.ChannelPolicy,
 			},
 		},
 	}
@@ -340,6 +350,12 @@ func (h *ResourceHandler) UpdateTeam(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.Leader.Package != "" {
 			team.Spec.Leader.Package = req.Leader.Package
+		}
+		if req.Leader.Heartbeat != nil {
+			team.Spec.Leader.Heartbeat = toHeartbeatSpec(req.Leader.Heartbeat)
+		}
+		if req.Leader.WorkerIdleTimeout != "" {
+			team.Spec.Leader.WorkerIdleTimeout = req.Leader.WorkerIdleTimeout
 		}
 		if req.Leader.ChannelPolicy != nil {
 			team.Spec.Leader.ChannelPolicy = req.Leader.ChannelPolicy
@@ -476,18 +492,168 @@ func (h *ResourceHandler) DeleteHuman(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// --- Managers ---
+
+func (h *ResourceHandler) CreateManager(w http.ResponseWriter, r *http.Request) {
+	var req CreateManagerRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httputil.WriteError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if req.Name == "" {
+		httputil.WriteError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	if req.Model == "" {
+		httputil.WriteError(w, http.StatusBadRequest, "model is required")
+		return
+	}
+
+	mgr := &v1beta1.Manager{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      req.Name,
+			Namespace: h.namespace,
+		},
+		Spec: v1beta1.ManagerSpec{
+			Model:      req.Model,
+			Runtime:    req.Runtime,
+			Image:      req.Image,
+			Soul:       req.Soul,
+			Agents:     req.Agents,
+			Skills:     req.Skills,
+			McpServers: req.McpServers,
+			Package:    req.Package,
+		},
+	}
+	if req.Config != nil {
+		mgr.Spec.Config = *req.Config
+	}
+
+	if err := h.client.Create(r.Context(), mgr); err != nil {
+		writeK8sError(w, "create manager", err)
+		return
+	}
+
+	httputil.WriteJSON(w, http.StatusCreated, managerToResponse(mgr))
+}
+
+func (h *ResourceHandler) GetManager(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		httputil.WriteError(w, http.StatusBadRequest, "manager name is required")
+		return
+	}
+
+	var mgr v1beta1.Manager
+	if err := h.client.Get(r.Context(), client.ObjectKey{Name: name, Namespace: h.namespace}, &mgr); err != nil {
+		writeK8sError(w, "get manager", err)
+		return
+	}
+
+	httputil.WriteJSON(w, http.StatusOK, managerToResponse(&mgr))
+}
+
+func (h *ResourceHandler) ListManagers(w http.ResponseWriter, r *http.Request) {
+	var list v1beta1.ManagerList
+	if err := h.client.List(r.Context(), &list, client.InNamespace(h.namespace)); err != nil {
+		writeK8sError(w, "list managers", err)
+		return
+	}
+
+	managers := make([]ManagerResponse, 0, len(list.Items))
+	for i := range list.Items {
+		managers = append(managers, managerToResponse(&list.Items[i]))
+	}
+
+	httputil.WriteJSON(w, http.StatusOK, ManagerListResponse{Managers: managers, Total: len(managers)})
+}
+
+func (h *ResourceHandler) UpdateManager(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		httputil.WriteError(w, http.StatusBadRequest, "manager name is required")
+		return
+	}
+
+	var req UpdateManagerRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httputil.WriteError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+
+	var mgr v1beta1.Manager
+	if err := h.client.Get(r.Context(), client.ObjectKey{Name: name, Namespace: h.namespace}, &mgr); err != nil {
+		writeK8sError(w, "get manager for update", err)
+		return
+	}
+
+	if req.Model != "" {
+		mgr.Spec.Model = req.Model
+	}
+	if req.Runtime != "" {
+		mgr.Spec.Runtime = req.Runtime
+	}
+	if req.Image != "" {
+		mgr.Spec.Image = req.Image
+	}
+	if req.Soul != "" {
+		mgr.Spec.Soul = req.Soul
+	}
+	if req.Agents != "" {
+		mgr.Spec.Agents = req.Agents
+	}
+	if req.Skills != nil {
+		mgr.Spec.Skills = req.Skills
+	}
+	if req.McpServers != nil {
+		mgr.Spec.McpServers = req.McpServers
+	}
+	if req.Package != "" {
+		mgr.Spec.Package = req.Package
+	}
+	if req.Config != nil {
+		mgr.Spec.Config = *req.Config
+	}
+
+	if err := h.client.Update(r.Context(), &mgr); err != nil {
+		writeK8sError(w, "update manager", err)
+		return
+	}
+
+	httputil.WriteJSON(w, http.StatusOK, managerToResponse(&mgr))
+}
+
+func (h *ResourceHandler) DeleteManager(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		httputil.WriteError(w, http.StatusBadRequest, "manager name is required")
+		return
+	}
+
+	mgr := &v1beta1.Manager{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: h.namespace},
+	}
+	if err := h.client.Delete(r.Context(), mgr); err != nil {
+		writeK8sError(w, "delete manager", err)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // --- Conversion helpers ---
 
 func workerToResponse(w *v1beta1.Worker) WorkerResponse {
 	resp := WorkerResponse{
-		Name:         w.Name,
-		Phase:        w.Status.Phase,
-		Model:        w.Spec.Model,
-		Runtime:      w.Spec.Runtime,
-		Image:        w.Spec.Image,
-		MatrixUserID: w.Status.MatrixUserID,
-		RoomID:       w.Status.RoomID,
-		Message:      w.Status.Message,
+		Name:           w.Name,
+		Phase:          w.Status.Phase,
+		Model:          w.Spec.Model,
+		Runtime:        w.Spec.Runtime,
+		Image:          w.Spec.Image,
+		ContainerState: w.Status.ContainerState,
+		MatrixUserID:   w.Status.MatrixUserID,
+		RoomID:         w.Status.RoomID,
+		Message:        w.Status.Message,
 	}
 	if resp.Phase == "" {
 		resp.Phase = "Pending"
@@ -504,15 +670,18 @@ func workerToResponse(w *v1beta1.Worker) WorkerResponse {
 
 func teamToResponse(t *v1beta1.Team) TeamResponse {
 	resp := TeamResponse{
-		Name:         t.Name,
-		Phase:        t.Status.Phase,
-		Description:  t.Spec.Description,
-		LeaderName:   t.Spec.Leader.Name,
-		TeamRoomID:   t.Status.TeamRoomID,
-		LeaderReady:  t.Status.LeaderReady,
-		ReadyWorkers: t.Status.ReadyWorkers,
-		TotalWorkers: t.Status.TotalWorkers,
-		Message:      t.Status.Message,
+		Name:              t.Name,
+		Phase:             t.Status.Phase,
+		Description:       t.Spec.Description,
+		LeaderName:        t.Spec.Leader.Name,
+		LeaderHeartbeat:   t.Spec.Leader.Heartbeat,
+		WorkerIdleTimeout: t.Spec.Leader.WorkerIdleTimeout,
+		TeamRoomID:        t.Status.TeamRoomID,
+		LeaderDMRoomID:    t.Status.LeaderDMRoomID,
+		LeaderReady:       t.Status.LeaderReady,
+		ReadyWorkers:      t.Status.ReadyWorkers,
+		TotalWorkers:      t.Status.TotalWorkers,
+		Message:           t.Status.Message,
 	}
 	if resp.Phase == "" {
 		resp.Phase = "Pending"
@@ -527,6 +696,41 @@ func teamToResponse(t *v1beta1.Team) TeamResponse {
 				resp.WorkerExposedPorts[wn] = append(resp.WorkerExposedPorts[wn], ExposedPortInfo{Port: p.Port, Domain: p.Domain})
 			}
 		}
+	}
+	return resp
+}
+
+func toHeartbeatSpec(req *TeamLeaderHeartbeatRequest) *v1beta1.TeamLeaderHeartbeatSpec {
+	if req == nil {
+		return nil
+	}
+
+	spec := &v1beta1.TeamLeaderHeartbeatSpec{
+		Every: req.Every,
+	}
+	if req.Enabled != nil {
+		spec.Enabled = *req.Enabled
+	}
+	if !spec.Enabled && spec.Every == "" {
+		return nil
+	}
+	return spec
+}
+
+func managerToResponse(m *v1beta1.Manager) ManagerResponse {
+	resp := ManagerResponse{
+		Name:         m.Name,
+		Phase:        m.Status.Phase,
+		Model:        m.Spec.Model,
+		Runtime:      m.Spec.Runtime,
+		Image:        m.Spec.Image,
+		MatrixUserID: m.Status.MatrixUserID,
+		RoomID:       m.Status.RoomID,
+		Version:      m.Status.Version,
+		Message:      m.Status.Message,
+	}
+	if resp.Phase == "" {
+		resp.Phase = "Pending"
 	}
 	return resp
 }

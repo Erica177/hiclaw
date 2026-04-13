@@ -2,15 +2,15 @@
 
 > 基于 `hiclaw-controller-refactor.md` 设计文档，对照 `hiclaw-controller-refactor` 分支实际实现情况。
 >
-> 更新时间：2026-04-08
+> 更新时间：2026-04-10
 
 ## 总览
 
 | Phase | 目标 | 完成度 | 状态 |
 |-------|------|--------|------|
-| Phase 1 | Controller 核心重构（去脚本化） | ~85% | 进行中 |
-| Phase 2 | incluster 模式 & Helm | ~60% | 进行中 |
-| Phase 3 | Manager Agent 改造 & Team Leader 增强 | 0% | 未开始 |
+| Phase 1 | Controller 核心重构（去脚本化） | ~90% | 进行中（仅 ConfigVersionManager 未实现） |
+| Phase 2 | incluster 模式 & Helm & Embedded 部署 | ~90% | 进行中（集成测试通过中） |
+| Phase 3 | Manager Agent 改造 & Team Leader 增强 | ~25% | 部分进行中 |
 | Phase 4 | Debug 能力 & 平滑升级 | 0% | 未开始 |
 
 ---
@@ -63,7 +63,7 @@
 
 | 项目 | 设计路径 | 实际路径 | 状态 |
 |------|---------|---------|------|
-| Initializer | `internal/orchestrator/initializer.go`  | ❌ 未实现 |
+| Initializer | `internal/orchestrator/initializer.go` | `internal/initializer/initializer.go` | ✅ 完成（路径有调整） |
 
 ### 1.5 配置版本管理
 
@@ -115,16 +115,27 @@
 | Pod 健康检查 & 就绪探针 | ⚠️ 需确认 | 就绪检测在早期 commit 中实现 |
 | Service 创建（端口暴露） | ✅ 完成 | `internal/service/provisioner_expose.go` |
 
-### 2.2 hiclaw CLI incluster 模式
+### 2.2 hiclaw CLI REST API 客户端改造
+
+CLI 已完全重写为 REST API 客户端，不再直接操作 MinIO。所有命令通过 `HICLAW_CONTROLLER_URL`（默认 `http://localhost:8090`）调用 controller REST API，Token 通过 `HICLAW_AUTH_TOKEN` 或 SA token 文件自动发现。
 
 | 项目 | 状态 | 说明 |
 |------|------|------|
-| CLI 入口 | ✅ 完成 | `cmd/hiclaw/main.go` |
-| 自动检测运行环境 | ⚠️ 需确认 | — |
-| worker lifecycle 命令 | ⚠️ 部分 | API 层已有 lifecycle_handler.go，CLI 侧需确认 |
+| CLI 重写为 REST API 客户端 | ✅ 完成 | `cmd/hiclaw/client.go` — HTTP client + token/URL 发现 |
+| create worker/team/human/manager | ✅ 完成 | `cmd/hiclaw/create.go` — POST /api/v1/{resource}s |
+| get workers/teams/humans/managers | ✅ 完成 | `cmd/hiclaw/get.go` — GET (list/detail/--team 过滤/-o json) |
+| update worker/team/manager | ✅ 完成 | `cmd/hiclaw/update.go` — PUT /api/v1/{resource}s/{name} |
+| delete worker/team/human/manager | ✅ 完成 | `cmd/hiclaw/delete.go` — DELETE /api/v1/{resource}s/{name} |
+| worker wake/sleep/ensure-ready | ✅ 完成 | `cmd/hiclaw/worker_cmd.go` — POST lifecycle endpoints |
+| worker status (--name / --team) | ✅ 完成 | `cmd/hiclaw/worker_cmd.go` — GET status endpoint |
+| status / version | ✅ 完成 | `cmd/hiclaw/status_cmd.go` |
+| 表格/详情/JSON 输出格式化 | ✅ 完成 | `cmd/hiclaw/output.go` |
+| apply -f resource.yaml | ✅ 完成 | `cmd/hiclaw/apply.go` — 声明式 YAML apply（解析 YAML → REST API upsert） |
+| apply worker --zip | ✅ 完成 | `cmd/hiclaw/apply.go` — ZIP 上传 → POST /api/v1/packages → upsert Worker |
+| apply worker --params | ✅ 完成 | `cmd/hiclaw/apply.go` — 支持 --model/--soul-file/--skills/--mcp-servers 等参数 |
+| apply --prune | ❌ TODO | 全量同步（LIST + DELETE 多余资源） |
 | config push 命令 | ❌ 未实现 | — |
 | debug 命令 | ❌ 未实现 | — |
-| status 命令 | ✅ 完成 | status_handler.go |
 
 ### 2.3 Helm Chart
 
@@ -150,25 +161,35 @@
 | Worker | ✅ | ✅ | ✅ | 完成 |
 | Team | ✅ | ✅ | ✅ | 完成 |
 | Human | ✅ | ✅ | ✅ | 完成 |
-| Manager | ❌ | ❌ | ❌ | 未实现 |
+| Manager | ✅ | ✅ | ✅ | 完成 |
 | DebugWorker | ❌ | ❌ | ❌ | 未实现 |
+
+### 2.5 Embedded 模式双容器部署
+
+| 项目 | 状态 | 说明 |
+|------|------|------|
+| Dockerfile.embedded（all-in-one 镜像） | ✅ 完成 | Higress + Tuwunel + MinIO + Element Web + Controller + CLI + kube-apiserver |
+| supervisord.embedded.conf | ✅ 完成 | 分层启动：基础设施(50-100) → Higress(200-600) → Element(650) → Controller(700-750) |
+| install-embedded.sh 安装脚本 | ✅ 完成 | 双容器部署：controller 容器 + manager-agent 容器（由 controller 自动创建） |
+| Makefile build-embedded 目标 | ✅ 完成 | 构建链：build-embedded → build-manager-k8s → build-worker → build-copaw-worker |
+| Manager Agent 自动创建 | ✅ 完成 | ManagerReconciler 通过 DockerBackend 自动创建 manager 容器 |
+| 测试基础设施适配 | ✅ 完成 | test-helpers.sh 支持双容器模式（exec_in_manager / exec_in_agent） |
+| 集成测试通过情况 | ⚠️ 进行中 | test-01 ~ test-06✅|
 
 ---
 
 ## Phase 3: Manager Agent 改造 & Team Leader 增强
 
-全部未开始。
-
-| 项目 | 状态 |
-|------|------|
-| Manager Skill 改造（调用 hiclaw CLI 替代直接脚本） | ❌ |
-| Manager 无状态化（state.json → OSS） | ❌ |
-| Manager CRD 驱动部署 | ❌ |
-| Team Leader Heartbeat 机制 | ❌ |
-| Team Leader Worker 生命周期管理 | ❌ |
-| Leader permissions 配置 | ❌ |
-| Quota 检查机制 | ❌ |
-| CallerIdentity 权限隔离 | ❌ |
+| 项目 | 状态 | 说明 |
+|------|------|------|
+| Manager Skill 改造（调用 hiclaw CLI 替代直接脚本） | ⚠️ 部分完成 | `container-api.sh` 已改为 controller REST API 薄封装；`create-worker.sh` 已删除（+1042 行），由 hiclaw CLI 替代 |
+| Manager 无状态化（state.json → OSS） | ❌ 未实现 | — |
+| Manager CRD 驱动部署 | ✅ 完成 | Manager CRD + ManagerReconciler + 自动创建 Manager 容器 |
+| Team Leader Heartbeat 机制 | ✅ 完成 | `4870b26` — heartbeat、worker idle timeout、sleep lifecycle |
+| Team Leader Worker 生命周期管理 | ✅ 完成 | worker-lifecycle skill + sleep/wake API |
+| Leader permissions 配置 | ⚠️ 部分完成 | RBAC 中间件已实现 SA 认证 + 角色鉴权 |
+| Quota 检查机制 | ❌ 未实现 | — |
+| CallerIdentity 权限隔离 | ⚠️ 部分完成 | SA Token 认证已实现，细粒度 CallerIdentity 隔离待完善 |
 
 ---
 
@@ -205,6 +226,56 @@
 | `2b0bb85` ~ `f535136` | HTTP Server 重构、API 错误处理、RBAC |
 | `f30e870` ~ `fd1b9b3` | K8s ServiceAccount 认证鉴权 |
 | `bbb4ae3` | Tuwunel/MinIO 改为 StatefulSet |
-| `53a28ad` | 最新：local-k8s-up.sh 更新 + Worker 管理增强 |
+| `53a28ad` | local-k8s-up.sh 更新 + Worker 管理增强 |
+| `3c17fe1` ~ `2c0ddc3` | Manager CRD + ManagerReconciler + Go Initializer |
+| `20fcb7b` ~ `cdb4016` | Manager REST API（CRUD）+ RBAC 配置 |
+| `7361df1` | hiclaw CLI 重写为 REST API 客户端（去 mcExec，纯 HTTP client） |
+| `563cc9c` | Embedded Controller 支持：Dockerfile.embedded + supervisord + ManagerReconciler embedded 模式 |
+| `0431b79` | 测试脚本适配双容器模式（exec_in_manager / exec_in_agent） |
+| `f6dbba3` | hiclaw CLI 增强 + install-embedded.sh 安装脚本 |
+| `7aaab59` | Makefile 统一 + apply 命令 + PackageHandler（ZIP 上传） |
+| `4870b26` | Team Leader heartbeat、worker idle timeout、sleep lifecycle |
+| `5208729` | AI route 认证修复 + 测试脚本执行上下文修正 |
+| `a0deb6e` | Agent 模板管理增强 + observedGeneration + MinIO prefix 修复 |
+
+---
+
+## Shell 脚本替代进度
+
+| 原 Shell 脚本 | 替代方案 | 状态 |
+|---------------|---------|------|
+| `create-worker.sh`（1042 行） | Go Provisioner + Deployer + WorkerReconciler | ✅ 已删除 |
+| `container-api.sh` | 改为 controller REST API 薄封装 | ✅ 大幅精简 |
+| `gateway-api.sh` | Go Gateway Client + Provisioner | ✅ 大幅精简 |
+| `aliyun-api.py`（527 行） | Go 云端后端（SAE/APIG） | ✅ 已删除 |
+| `aliyun-sae.sh` | Go SAE Backend | ✅ 已删除 |
+| `start-manager-agent.sh` | 仍作为 Manager 容器 entrypoint | ⚠️ 保留（容器内初始化） |
+| `upgrade-builtins.sh` | 仍由 start-manager-agent.sh 调用 | ⚠️ 保留 |
+| `setup-higress.sh` | Go Initializer 处理大部分 | ⚠️ 部分保留 |
+
+---
+
+## 集成测试通过情况（Embedded 模式）
+
+| 测试 | 说明 | 状态 |
+|------|------|------|
+| test-01 | Manager Boot（服务健康、Matrix 登录、Higress 控制台、MinIO 存储） | ✅ 通过 |
+| test-02 | Create Worker（通过 Matrix 对话创建 Worker） | ✅ 通过 |
+| test-15 | Import Worker ZIP | ⚠️ 待验证 |
+| test-17 | Worker Config Verify（导入、配置产物、MinIO 存储） | ✅ 通过 |
+| test-18 | Team Config Verify | ⚠️ 待验证 |
+| test-19 | Human and Team Admin | ⚠️ 待验证 |
+| test-20 | Inline Worker Config | ⚠️ 待验证 |
+| test-21 | Team Project DAG | ⚠️ 待验证 |
+| test-100 | Cleanup | ⚠️ 待验证 |
+
+---
+
+## 当前阻塞项 & 下一步
+
+1. **集成测试全量通过**：继续调试 test-15/18/19/20/21/100，确保 embedded 模式下所有测试通过
+2. **Manager Shell 脚本进一步替代**：`start-manager-agent.sh` 中的 workspace sync、builtin upgrade 逻辑可考虑迁移到 Go
+3. **ConfigVersionManager**：Phase 1 唯一未实现项，skill 热更新和 runtime 滚动升级依赖此组件
+4. **apply --prune**：声明式全量同步，用于 GitOps 场景
 
 ---

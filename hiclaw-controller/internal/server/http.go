@@ -7,6 +7,7 @@ import (
 	"github.com/hiclaw/hiclaw-controller/internal/backend"
 	"github.com/hiclaw/hiclaw-controller/internal/credentials"
 	"github.com/hiclaw/hiclaw-controller/internal/gateway"
+	"github.com/hiclaw/hiclaw-controller/internal/oss"
 	"github.com/hiclaw/hiclaw-controller/internal/proxy"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -17,6 +18,7 @@ type ServerDeps struct {
 	Client     client.Client
 	Backend    *backend.Registry
 	Gateway    gateway.Client
+	OSS        oss.StorageClient
 	STS        *credentials.STSService
 	AuthMw     *authpkg.Middleware
 	KubeMode   string
@@ -67,6 +69,17 @@ func NewHTTPServer(addr string, deps ServerDeps) *HTTPServer {
 	mux.Handle("GET /api/v1/humans", mw.RequireAuthz(authpkg.ActionList, "human", nil)(http.HandlerFunc(rh.ListHumans)))
 	mux.Handle("GET /api/v1/humans/{name}", mw.RequireAuthz(authpkg.ActionGet, "human", nameFn)(http.HandlerFunc(rh.GetHuman)))
 	mux.Handle("DELETE /api/v1/humans/{name}", mw.RequireAuthz(authpkg.ActionDelete, "human", nameFn)(http.HandlerFunc(rh.DeleteHuman)))
+
+	// Managers
+	mux.Handle("POST /api/v1/managers", mw.RequireAuthz(authpkg.ActionCreate, "manager", nil)(http.HandlerFunc(rh.CreateManager)))
+	mux.Handle("GET /api/v1/managers", mw.RequireAuthz(authpkg.ActionList, "manager", nil)(http.HandlerFunc(rh.ListManagers)))
+	mux.Handle("GET /api/v1/managers/{name}", mw.RequireAuthz(authpkg.ActionGet, "manager", nameFn)(http.HandlerFunc(rh.GetManager)))
+	mux.Handle("PUT /api/v1/managers/{name}", mw.RequireAuthz(authpkg.ActionUpdate, "manager", nameFn)(http.HandlerFunc(rh.UpdateManager)))
+	mux.Handle("DELETE /api/v1/managers/{name}", mw.RequireAuthz(authpkg.ActionDelete, "manager", nameFn)(http.HandlerFunc(rh.DeleteManager)))
+
+	// --- Package upload ---
+	ph := NewPackageHandler(deps.OSS)
+	mux.Handle("POST /api/v1/packages", mw.RequireAuthz(authpkg.ActionCreate, "worker", nil)(http.HandlerFunc(ph.Upload)))
 
 	// --- Imperative lifecycle ---
 	lh := NewLifecycleHandler(deps.Client, deps.Backend, deps.Namespace)

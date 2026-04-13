@@ -67,6 +67,15 @@ spec:
                       type: string
                     package:
                       type: string
+                    heartbeat:
+                      type: object
+                      properties:
+                        enabled:
+                          type: boolean
+                        every:
+                          type: string
+                    workerIdleTimeout:
+                      type: string
                     channelPolicy:
                       type: object
                       properties:
@@ -156,6 +165,8 @@ spec:
                   type: string
                   enum: [Pending, Active, Degraded, Failed]
                 teamRoomID:
+                  type: string
+                leaderDMRoomID:
                   type: string
                 leaderReady:
                   type: boolean

@@ -21,16 +21,16 @@ type Worker struct {
 }
 
 type WorkerSpec struct {
-	Model      string          `json:"model"`
-	Runtime    string          `json:"runtime,omitempty"` // openclaw | copaw (default: openclaw)
-	Image      string          `json:"image,omitempty"`   // custom Docker image
-	Identity   string          `json:"identity,omitempty"`
-	Soul       string          `json:"soul,omitempty"`
-	Agents     string          `json:"agents,omitempty"`
-	Skills     []string        `json:"skills,omitempty"`
-	McpServers []string        `json:"mcpServers,omitempty"`
-	Package    string          `json:"package,omitempty"` // file://, http(s)://, or nacos:// URI
-	Expose     []ExposePort    `json:"expose,omitempty"`  // ports to expose via Higress gateway
+	Model         string             `json:"model"`
+	Runtime       string             `json:"runtime,omitempty"` // openclaw | copaw (default: openclaw)
+	Image         string             `json:"image,omitempty"`   // custom Docker image
+	Identity      string             `json:"identity,omitempty"`
+	Soul          string             `json:"soul,omitempty"`
+	Agents        string             `json:"agents,omitempty"`
+	Skills        []string           `json:"skills,omitempty"`
+	McpServers    []string           `json:"mcpServers,omitempty"`
+	Package       string             `json:"package,omitempty"` // file://, http(s)://, or nacos:// URI
+	Expose        []ExposePort       `json:"expose,omitempty"`  // ports to expose via Higress gateway
 	ChannelPolicy *ChannelPolicySpec `json:"channelPolicy,omitempty"`
 }
 
@@ -52,7 +52,7 @@ type ChannelPolicySpec struct {
 
 type WorkerStatus struct {
 	ObservedGeneration int64               `json:"observedGeneration,omitempty"`
-	Phase              string              `json:"phase,omitempty"` // Pending/Running/Stopped/Failed
+	Phase              string              `json:"phase,omitempty"` // Pending/Running/Sleeping/Failed
 	MatrixUserID       string              `json:"matrixUserID,omitempty"`
 	RoomID             string              `json:"roomID,omitempty"`
 	ContainerState     string              `json:"containerState,omitempty"`
@@ -87,12 +87,12 @@ type Team struct {
 }
 
 type TeamSpec struct {
-	Description  string           `json:"description,omitempty"`
-	Admin        *TeamAdminSpec   `json:"admin,omitempty"`
-	Leader       LeaderSpec       `json:"leader"`
-	Workers      []TeamWorkerSpec `json:"workers"`
-	PeerMentions *bool            `json:"peerMentions,omitempty"` // default true
-	ChannelPolicy   *ChannelPolicySpec  `json:"channelPolicy,omitempty"`  // team-wide overrides
+	Description   string             `json:"description,omitempty"`
+	Admin         *TeamAdminSpec     `json:"admin,omitempty"`
+	Leader        LeaderSpec         `json:"leader"`
+	Workers       []TeamWorkerSpec   `json:"workers"`
+	PeerMentions  *bool              `json:"peerMentions,omitempty"`  // default true
+	ChannelPolicy *ChannelPolicySpec `json:"channelPolicy,omitempty"` // team-wide overrides
 }
 
 type TeamAdminSpec struct {
@@ -101,38 +101,45 @@ type TeamAdminSpec struct {
 }
 
 type LeaderSpec struct {
-	Name       string          `json:"name"`
-	Model      string          `json:"model,omitempty"`
-	Identity   string          `json:"identity,omitempty"`
-	Soul       string          `json:"soul,omitempty"`
-	Agents     string          `json:"agents,omitempty"`
-	Package    string          `json:"package,omitempty"`
-	ChannelPolicy *ChannelPolicySpec `json:"channelPolicy,omitempty"`
+	Name              string                   `json:"name"`
+	Model             string                   `json:"model,omitempty"`
+	Identity          string                   `json:"identity,omitempty"`
+	Soul              string                   `json:"soul,omitempty"`
+	Agents            string                   `json:"agents,omitempty"`
+	Package           string                   `json:"package,omitempty"`
+	Heartbeat         *TeamLeaderHeartbeatSpec `json:"heartbeat,omitempty"`
+	WorkerIdleTimeout string                   `json:"workerIdleTimeout,omitempty"`
+	ChannelPolicy     *ChannelPolicySpec       `json:"channelPolicy,omitempty"`
+}
+
+type TeamLeaderHeartbeatSpec struct {
+	Enabled bool   `json:"enabled,omitempty"`
+	Every   string `json:"every,omitempty"`
 }
 
 type TeamWorkerSpec struct {
-	Name       string          `json:"name"`
-	Model      string          `json:"model,omitempty"`
-	Runtime    string          `json:"runtime,omitempty"`
-	Image      string          `json:"image,omitempty"`
-	Identity   string          `json:"identity,omitempty"`
-	Soul       string          `json:"soul,omitempty"`
-	Agents     string          `json:"agents,omitempty"`
-	Skills     []string        `json:"skills,omitempty"`
-	McpServers []string        `json:"mcpServers,omitempty"`
-	Package    string          `json:"package,omitempty"`
-	Expose     []ExposePort    `json:"expose,omitempty"`
+	Name          string             `json:"name"`
+	Model         string             `json:"model,omitempty"`
+	Runtime       string             `json:"runtime,omitempty"`
+	Image         string             `json:"image,omitempty"`
+	Identity      string             `json:"identity,omitempty"`
+	Soul          string             `json:"soul,omitempty"`
+	Agents        string             `json:"agents,omitempty"`
+	Skills        []string           `json:"skills,omitempty"`
+	McpServers    []string           `json:"mcpServers,omitempty"`
+	Package       string             `json:"package,omitempty"`
+	Expose        []ExposePort       `json:"expose,omitempty"`
 	ChannelPolicy *ChannelPolicySpec `json:"channelPolicy,omitempty"`
 }
 
 type TeamStatus struct {
-	Phase              string `json:"phase,omitempty"` // Pending/Active/Degraded
-	TeamRoomID         string `json:"teamRoomID,omitempty"`
-	LeaderDMRoomID     string `json:"leaderDMRoomID,omitempty"`
-	LeaderReady        bool   `json:"leaderReady,omitempty"`
-	ReadyWorkers       int    `json:"readyWorkers,omitempty"`
-	TotalWorkers       int    `json:"totalWorkers,omitempty"`
-	Message            string `json:"message,omitempty"`
+	Phase              string                         `json:"phase,omitempty"` // Pending/Active/Degraded
+	TeamRoomID         string                         `json:"teamRoomID,omitempty"`
+	LeaderDMRoomID     string                         `json:"leaderDMRoomID,omitempty"`
+	LeaderReady        bool                           `json:"leaderReady,omitempty"`
+	ReadyWorkers       int                            `json:"readyWorkers,omitempty"`
+	TotalWorkers       int                            `json:"totalWorkers,omitempty"`
+	Message            string                         `json:"message,omitempty"`
 	WorkerExposedPorts map[string][]ExposedPortStatus `json:"workerExposedPorts,omitempty"`
 }
 
@@ -170,7 +177,7 @@ type HumanStatus struct {
 	InitialPassword string   `json:"initialPassword,omitempty"` // Set on creation, shown once
 	Rooms           []string `json:"rooms,omitempty"`
 	EmailSent       bool     `json:"emailSent,omitempty"`
-	Message      string   `json:"message,omitempty"`
+	Message         string   `json:"message,omitempty"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
@@ -179,4 +186,53 @@ type HumanList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []Human `json:"items"`
+}
+
+// +genclient
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+// Manager represents the HiClaw Manager Agent — the coordinator that receives
+// natural-language instructions from Admin and orchestrates Workers/Teams via
+// the hiclaw CLI / Controller REST API.
+type Manager struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+	Spec              ManagerSpec   `json:"spec"`
+	Status            ManagerStatus `json:"status,omitempty"`
+}
+
+type ManagerSpec struct {
+	Model      string        `json:"model"`
+	Runtime    string        `json:"runtime,omitempty"`    // openclaw | copaw (default: openclaw)
+	Image      string        `json:"image,omitempty"`      // custom Docker image
+	Soul       string        `json:"soul,omitempty"`       // custom SOUL.md content
+	Agents     string        `json:"agents,omitempty"`     // custom AGENTS.md content
+	Skills     []string      `json:"skills,omitempty"`     // on-demand skills to enable
+	McpServers []string      `json:"mcpServers,omitempty"` // MCP servers to authorize via Gateway
+	Package    string        `json:"package,omitempty"`    // file://, http(s)://, or nacos:// URI
+	Config     ManagerConfig `json:"config,omitempty"`
+}
+
+type ManagerConfig struct {
+	HeartbeatInterval string `json:"heartbeatInterval,omitempty"` // default: 15m
+	WorkerIdleTimeout string `json:"workerIdleTimeout,omitempty"` // default: 720m
+	NotifyChannel     string `json:"notifyChannel,omitempty"`     // default: admin-dm
+}
+
+type ManagerStatus struct {
+	ObservedGeneration int64  `json:"observedGeneration,omitempty"`
+	Phase              string `json:"phase,omitempty"` // Pending/Running/Updating/Failed
+	MatrixUserID       string `json:"matrixUserID,omitempty"`
+	RoomID             string `json:"roomID,omitempty"` // Admin DM room
+	ContainerState     string `json:"containerState,omitempty"`
+	Version            string `json:"version,omitempty"`
+	Message            string `json:"message,omitempty"`
+}
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+type ManagerList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []Manager `json:"items"`
 }

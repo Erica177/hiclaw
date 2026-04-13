@@ -30,10 +30,11 @@ _cleanup() {
         return
     fi
     log_info "All tests passed — cleaning up test worker: ${TEST_WORKER}"
-    exec_in_manager hiclaw delete worker "${TEST_WORKER}" 2>/dev/null || true
+    exec_in_agent hiclaw delete worker "${TEST_WORKER}" 2>/dev/null || true
     exec_in_manager mc rm "${STORAGE_PREFIX}/hiclaw-config/packages/${TEST_WORKER}*.zip" 2>/dev/null || true
     sleep 5
     docker rm -f "hiclaw-worker-${TEST_WORKER}" 2>/dev/null || true
+    exec_in_agent rm -rf "/tmp/hiclaw-test-${TEST_WORKER}" 2>/dev/null || true
     exec_in_manager rm -rf "/root/hiclaw-fs/agents/${TEST_WORKER}" 2>/dev/null || true
     exec_in_manager rm -rf "/tmp/hiclaw-test-${TEST_WORKER}" 2>/dev/null || true
     exec_in_manager mc rm -r --force "${STORAGE_PREFIX}/agents/${TEST_WORKER}/" 2>/dev/null || true
@@ -59,11 +60,11 @@ else
     log_fail "kube-apiserver process is not running"
 fi
 
-HICLAW_HELP=$(exec_in_manager hiclaw --help 2>&1 | head -1 || echo "")
+HICLAW_HELP=$(exec_in_agent hiclaw --help 2>&1 | head -1 || echo "")
 if echo "${HICLAW_HELP}" | grep -qi "hiclaw\|declarative\|resource"; then
-    log_pass "hiclaw CLI is available"
+    log_pass "hiclaw CLI is available (in agent container)"
 else
-    log_fail "hiclaw CLI is not available"
+    log_fail "hiclaw CLI is not available (in agent container)"
 fi
 
 # ============================================================
@@ -127,12 +128,15 @@ else
     log_fail "Failed to create test ZIP package"
 fi
 
+# Copy ZIP from controller to agent container (tar pipe avoids macOS /tmp symlink issues)
+copy_to_agent "${WORK_DIR}/${TEST_WORKER}.zip" "${WORK_DIR}/${TEST_WORKER}.zip"
+
 # ============================================================
 # Section 3: Import via hiclaw apply worker --zip
 # ============================================================
 log_section "Import Worker via hiclaw apply worker --zip"
 
-APPLY_OUTPUT=$(exec_in_manager hiclaw apply worker --zip "${WORK_DIR}/${TEST_WORKER}.zip" --name "${TEST_WORKER}" 2>&1)
+APPLY_OUTPUT=$(exec_in_agent hiclaw apply worker --zip "${WORK_DIR}/${TEST_WORKER}.zip" --name "${TEST_WORKER}" 2>&1)
 APPLY_EXIT=$?
 
 if [ ${APPLY_EXIT} -eq 0 ]; then
@@ -148,14 +152,17 @@ else
 fi
 
 # ============================================================
-# Section 4: Verify YAML + ZIP in MinIO
+# Section 4: Verify CRD + ZIP in MinIO
 # ============================================================
-log_section "Verify MinIO State"
+log_section "Verify Resource State"
 
-YAML_CONTENT=$(exec_in_manager mc cat "${STORAGE_PREFIX}/hiclaw-config/workers/${TEST_WORKER}.yaml" 2>/dev/null || echo "")
-assert_not_empty "${YAML_CONTENT}" "YAML file exists in MinIO hiclaw-config/workers/"
-assert_contains "${YAML_CONTENT}" "kind: Worker" "YAML contains kind: Worker"
-assert_contains "${YAML_CONTENT}" "name: ${TEST_WORKER}" "YAML contains correct name"
+# Brief pause for CR to propagate through kube-apiserver
+sleep 2
+
+WORKER_JSON=$(exec_in_agent hiclaw get workers "${TEST_WORKER}" -o json 2>/dev/null || echo "")
+assert_not_empty "${WORKER_JSON}" "Worker CR exists (hiclaw get workers)"
+WORKER_NAME_CHK=$(echo "${WORKER_JSON}" | jq -r '.name // empty' 2>/dev/null)
+assert_eq "${TEST_WORKER}" "${WORKER_NAME_CHK}" "Worker CR has correct name"
 
 PKG_EXISTS=$(exec_in_manager bash -c "mc ls '${STORAGE_PREFIX}/hiclaw-config/packages/${TEST_WORKER}.zip' >/dev/null 2>&1 && echo yes || echo no")
 if [ "${PKG_EXISTS}" = "yes" ]; then
@@ -169,7 +176,7 @@ fi
 # ============================================================
 log_section "Verify hiclaw get"
 
-GET_LIST=$(exec_in_manager hiclaw get workers 2>&1)
+GET_LIST=$(exec_in_agent hiclaw get workers 2>&1)
 assert_contains "${GET_LIST}" "${TEST_WORKER}" "Worker visible in 'hiclaw get workers'"
 
 # ============================================================
@@ -177,7 +184,7 @@ assert_contains "${GET_LIST}" "${TEST_WORKER}" "Worker visible in 'hiclaw get wo
 # ============================================================
 log_section "Idempotency"
 
-REIMPORT_OUTPUT=$(exec_in_manager hiclaw apply worker --zip "${WORK_DIR}/${TEST_WORKER}.zip" --name "${TEST_WORKER}" 2>&1)
+REIMPORT_OUTPUT=$(exec_in_agent hiclaw apply worker --zip "${WORK_DIR}/${TEST_WORKER}.zip" --name "${TEST_WORKER}" 2>&1)
 if echo "${REIMPORT_OUTPUT}" | grep -q "updated\|configured"; then
     log_pass "Re-import correctly reports 'updated' (idempotent)"
 else
@@ -213,21 +220,22 @@ else
     exec_in_manager cat /var/log/hiclaw/hiclaw-controller-error.log 2>/dev/null | grep "${TEST_WORKER}" | tail -5
 fi
 
-# Verify file watcher detected the change
-SYNC_LOG=$(exec_in_manager cat /var/log/hiclaw/hiclaw-controller-error.log 2>/dev/null | grep "syncing resource.*${TEST_WORKER}" || echo "")
-assert_not_empty "${SYNC_LOG}" "File watcher detected and synced resource"
+# Verify controller log confirms reconciliation completed
+RECONCILE_LOG=$(exec_in_manager cat /var/log/hiclaw/hiclaw-controller-error.log 2>/dev/null | grep "worker created.*${TEST_WORKER}" || echo "")
+assert_not_empty "${RECONCILE_LOG}" "Controller logged worker creation"
 
 # ============================================================
 # Section 8: Verify Worker infrastructure
 # ============================================================
 log_section "Verify Worker Infrastructure"
 
-# workers-registry.json
-REGISTRY_ENTRY=$(exec_in_manager jq -r --arg w "${TEST_WORKER}" '.workers[$w] // empty' /root/manager-workspace/workers-registry.json 2>/dev/null)
+# workers-registry.json (in MinIO, written by controller)
+REGISTRY_JSON=$(exec_in_manager mc cat "${STORAGE_PREFIX}/agents/manager/workers-registry.json" 2>/dev/null || echo "{}")
+REGISTRY_ENTRY=$(echo "${REGISTRY_JSON}" | jq -r --arg w "${TEST_WORKER}" '.workers[$w] // empty' 2>/dev/null)
 assert_not_empty "${REGISTRY_ENTRY}" "Worker registered in workers-registry.json"
 
-# Matrix Room
-ROOM_ID=$(echo "${REGISTRY_ENTRY}" | jq -r '.room_id // empty' 2>/dev/null)
+# Matrix Room (from CRD status)
+ROOM_ID=$(exec_in_agent hiclaw get workers "${TEST_WORKER}" -o json 2>/dev/null | jq -r '.roomID // empty')
 assert_not_empty "${ROOM_ID}" "Matrix Room created: ${ROOM_ID}"
 
 # openclaw.json in MinIO
@@ -352,7 +360,7 @@ fi
 # ============================================================
 log_section "Delete Worker"
 
-DELETE_OUTPUT=$(exec_in_manager hiclaw delete worker "${TEST_WORKER}" 2>&1)
+DELETE_OUTPUT=$(exec_in_agent hiclaw delete worker "${TEST_WORKER}" 2>&1)
 if echo "${DELETE_OUTPUT}" | grep -q "deleted"; then
     log_pass "hiclaw delete reported success"
 else
@@ -360,11 +368,13 @@ else
 fi
 
 sleep 2
-YAML_AFTER=$(exec_in_manager mc cat "${STORAGE_PREFIX}/hiclaw-config/workers/${TEST_WORKER}.yaml" 2>/dev/null || echo "")
-if [ -z "${YAML_AFTER}" ]; then
-    log_pass "YAML removed from MinIO after delete"
+WORKER_AFTER=$(exec_in_agent hiclaw get workers "${TEST_WORKER}" -o json 2>&1 || echo "")
+if echo "${WORKER_AFTER}" | grep -q "not found\|error\|Error"; then
+    log_pass "Worker CR removed after delete"
+elif [ -z "${WORKER_AFTER}" ]; then
+    log_pass "Worker CR removed after delete"
 else
-    log_fail "YAML still exists after delete"
+    log_fail "Worker CR still exists after delete"
 fi
 
 # ============================================================

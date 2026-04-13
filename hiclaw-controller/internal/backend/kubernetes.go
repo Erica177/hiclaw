@@ -99,7 +99,10 @@ func (k *K8sBackend) Available(_ context.Context) bool {
 }
 
 func (k *K8sBackend) Create(ctx context.Context, req CreateRequest) (*WorkerResult, error) {
-	podName := k.workerPodName(req.Name)
+	podName := req.ContainerName
+	if podName == "" {
+		podName = k.podName(req.NamePrefix, req.Name)
+	}
 	if _, err := k.client.Pods(k.config.Namespace).Get(ctx, podName, metav1.GetOptions{}); err == nil {
 		return nil, fmt.Errorf("%w: pod %q", ErrConflict, podName)
 	} else if !apierrors.IsNotFound(err) {
@@ -122,10 +125,12 @@ func (k *K8sBackend) Create(ctx context.Context, req CreateRequest) (*WorkerResu
 	req.Env["HICLAW_AUTH_TOKEN_FILE"] = "/var/run/secrets/hiclaw/token"
 
 	image := req.Image
-	if req.Runtime == RuntimeCopaw && k.config.CopawWorkerImage != "" {
-		image = k.config.CopawWorkerImage
-	} else if k.config.WorkerImage != "" {
-		image = k.config.WorkerImage
+	if image == "" {
+		if req.Runtime == RuntimeCopaw && k.config.CopawWorkerImage != "" {
+			image = k.config.CopawWorkerImage
+		} else if k.config.WorkerImage != "" {
+			image = k.config.WorkerImage
+		}
 	}
 	if image == "" {
 		return nil, fmt.Errorf("no worker image configured for kubernetes backend")
@@ -142,6 +147,25 @@ func (k *K8sBackend) Create(ctx context.Context, req CreateRequest) (*WorkerResu
 		}
 	}
 
+	cpuLimit := k.config.WorkerCPU
+	memLimit := k.config.WorkerMemory
+	cpuReq := "100m"
+	memReq := "256Mi"
+	if req.Resources != nil {
+		if req.Resources.CPULimit != "" {
+			cpuLimit = req.Resources.CPULimit
+		}
+		if req.Resources.MemoryLimit != "" {
+			memLimit = req.Resources.MemoryLimit
+		}
+		if req.Resources.CPURequest != "" {
+			cpuReq = req.Resources.CPURequest
+		}
+		if req.Resources.MemoryRequest != "" {
+			memReq = req.Resources.MemoryRequest
+		}
+	}
+
 	container := corev1.Container{
 		Name:            "worker",
 		Image:           image,
@@ -149,12 +173,12 @@ func (k *K8sBackend) Create(ctx context.Context, req CreateRequest) (*WorkerResu
 		Env:             buildK8sEnvVars(req.Env),
 		Resources: corev1.ResourceRequirements{
 			Limits: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse(k.config.WorkerCPU),
-				corev1.ResourceMemory: resource.MustParse(k.config.WorkerMemory),
+				corev1.ResourceCPU:    resource.MustParse(cpuLimit),
+				corev1.ResourceMemory: resource.MustParse(memLimit),
 			},
 			Requests: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse("100m"),
-				corev1.ResourceMemory: resource.MustParse("256Mi"),
+				corev1.ResourceCPU:    resource.MustParse(cpuReq),
+				corev1.ResourceMemory: resource.MustParse(memReq),
 			},
 		},
 		WorkingDir: req.WorkingDir,
@@ -206,15 +230,26 @@ func (k *K8sBackend) Create(ctx context.Context, req CreateRequest) (*WorkerResu
 		podSpec.HostAliases = hostAliases
 	}
 
+	podLabels := map[string]string{
+		"hiclaw.io/runtime": defaultRuntime(req.Runtime),
+	}
+	for k, v := range req.Labels {
+		podLabels[k] = v
+	}
+	if podLabels["app"] == "" {
+		podLabels["app"] = "hiclaw-worker"
+	}
+	if _, hasManager := podLabels["hiclaw.io/manager"]; !hasManager {
+		if podLabels["hiclaw.io/worker"] == "" {
+			podLabels["hiclaw.io/worker"] = req.Name
+		}
+	}
+
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      podName,
 			Namespace: k.config.Namespace,
-			Labels: map[string]string{
-				"app":               "hiclaw-worker",
-				"hiclaw.io/worker":  req.Name,
-				"hiclaw.io/runtime": defaultRuntime(req.Runtime),
-			},
+			Labels:    podLabels,
 			Annotations: map[string]string{
 				"hiclaw.io/created-by": "controller",
 			},
@@ -311,6 +346,13 @@ func (k *K8sBackend) List(ctx context.Context) ([]WorkerResult, error) {
 		})
 	}
 	return results, nil
+}
+
+func (k *K8sBackend) podName(prefix, name string) string {
+	if prefix != "" {
+		return prefix + name
+	}
+	return k.containerPrefix + name
 }
 
 func (k *K8sBackend) workerPodName(name string) string {

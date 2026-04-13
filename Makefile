@@ -25,7 +25,6 @@ REGISTRY       ?= higress-registry.cn-hangzhou.cr.aliyuncs.com
 REPO           ?= higress
 
 MANAGER_IMAGE        ?= $(REGISTRY)/$(REPO)/hiclaw-manager
-MANAGER_ALIYUN_IMAGE ?= $(REGISTRY)/$(REPO)/hiclaw-manager-aliyun
 MANAGER_COPAW_IMAGE  ?= $(REGISTRY)/$(REPO)/hiclaw-manager-copaw
 WORKER_IMAGE         ?= $(REGISTRY)/$(REPO)/hiclaw-worker
 COPAW_WORKER_IMAGE   ?= $(REGISTRY)/$(REPO)/hiclaw-copaw-worker
@@ -33,7 +32,6 @@ OPENCLAW_BASE_IMAGE  ?= $(REGISTRY)/$(REPO)/openclaw-base
 CONTROLLER_IMAGE     ?= $(REGISTRY)/$(REPO)/hiclaw-controller
 
 MANAGER_TAG        ?= $(MANAGER_IMAGE):$(VERSION)
-MANAGER_ALIYUN_TAG ?= $(MANAGER_ALIYUN_IMAGE):$(VERSION)
 MANAGER_COPAW_TAG  ?= $(MANAGER_COPAW_IMAGE):$(VERSION)
 WORKER_TAG         ?= $(WORKER_IMAGE):$(VERSION)
 COPAW_WORKER_TAG   ?= $(COPAW_WORKER_IMAGE):$(VERSION)
@@ -41,13 +39,13 @@ OPENCLAW_BASE_TAG  ?= $(OPENCLAW_BASE_IMAGE):$(VERSION)
 CONTROLLER_TAG     ?= $(CONTROLLER_IMAGE):$(VERSION)
 
 # Local image names (no registry prefix, used by tests and install script)
-LOCAL_MANAGER        = hiclaw/manager-agent:$(VERSION)
-LOCAL_MANAGER_ALIYUN = hiclaw/manager-aliyun:$(VERSION)
-LOCAL_MANAGER_COPAW  = hiclaw/manager-copaw:$(VERSION)
+LOCAL_MANAGER        = hiclaw/hiclaw-manager:$(VERSION)
+LOCAL_MANAGER_COPAW  = hiclaw/hiclaw-manager-copaw:$(VERSION)
 LOCAL_WORKER         = hiclaw/worker-agent:$(VERSION)
 LOCAL_COPAW_WORKER   = hiclaw/copaw-worker:$(VERSION)
 LOCAL_OPENCLAW_BASE  = hiclaw/openclaw-base:$(VERSION)
 LOCAL_CONTROLLER     = hiclaw/hiclaw-controller:$(VERSION)
+LOCAL_EMBEDDED       = hiclaw/hiclaw-embedded:$(VERSION)
 
 # Higress base image registry (regional mirrors auto-synced from cn-hangzhou primary)
 #   China (default): higress-registry.cn-hangzhou.cr.aliyuncs.com
@@ -98,13 +96,13 @@ LINES          ?= 50
 
 # ---------- Phony targets ----------
 
-.PHONY: all build build-openclaw-base build-hiclaw-controller build-manager build-manager-aliyun build-manager-copaw build-worker build-copaw-worker \
-        tag push push-openclaw-base push-hiclaw-controller push-manager push-manager-aliyun push-manager-copaw push-worker push-copaw-worker \
+.PHONY: all build build-openclaw-base build-hiclaw-controller build-embedded build-manager build-manager-copaw build-worker build-copaw-worker \
+        tag push push-openclaw-base push-hiclaw-controller push-manager push-manager-copaw push-worker push-copaw-worker \
         push-native push-native-manager push-native-manager-copaw push-native-worker push-native-copaw-worker \
         buildx-setup \
-        test test-quick test-installed \
-        install uninstall replay replay-log \
-        verify \
+        test test-quick test-installed test-embedded \
+        install install-embedded uninstall uninstall-embedded replay replay-log \
+        verify wait-ready wait-ready-embedded \
         status logs \
         mirror-images clean help
 
@@ -114,7 +112,7 @@ all: build
 
 # ---------- Build ----------
 
-build: build-manager build-manager-aliyun build-manager-copaw build-worker build-copaw-worker build-hiclaw-controller ## Build all images (base image pulled from registry, not rebuilt locally)
+build: build-manager build-manager-copaw build-worker build-copaw-worker build-hiclaw-controller ## Build all images (base image pulled from registry, not rebuilt locally)
 
 build-openclaw-base: ## Build OpenClaw base image
 	@echo "==> Building OpenClaw base image: $(LOCAL_OPENCLAW_BASE) (registry: $(HIGRESS_REGISTRY))"
@@ -139,23 +137,25 @@ build-manager: build-hiclaw-controller ## Build Manager image (OpenClaw runtime)
 	@echo "==> Building Manager image: $(LOCAL_MANAGER) (registry: $(HIGRESS_REGISTRY))"
 	docker build $(PLATFORM_FLAG) $(REGISTRY_ARG) $(BUILTIN_VERSION_ARG) $(OPENCLAW_BASE_BUILD_ARG) $(SHARED_LIB_CTX) $(DOCKER_BUILD_ARGS) \
 		--build-arg HICLAW_CONTROLLER_IMAGE=$(LOCAL_CONTROLLER) \
+		-f manager/Dockerfile \
 		-t $(LOCAL_MANAGER) \
-		./manager/
-
-build-manager-aliyun: ## Build Manager Aliyun image
-	@echo "==> Building Manager Aliyun image: $(LOCAL_MANAGER_ALIYUN) (registry: $(HIGRESS_REGISTRY))"
-	docker build $(PLATFORM_FLAG) $(REGISTRY_ARG) $(BUILTIN_VERSION_ARG) $(OPENCLAW_BASE_BUILD_ARG) $(DOCKER_BUILD_ARGS) \
-		-f manager/Dockerfile.aliyun \
-		-t $(LOCAL_MANAGER_ALIYUN) \
 		.
 
 build-manager-copaw: build-hiclaw-controller ## Build Manager CoPaw image (Python runtime)
 	@echo "==> Building Manager CoPaw image: $(LOCAL_MANAGER_COPAW) (registry: $(HIGRESS_REGISTRY))"
-	docker build $(PLATFORM_FLAG) $(REGISTRY_ARG) $(BUILTIN_VERSION_ARG) $(SHARED_LIB_CTX) $(COPAW_WORKER_CTX) $(DOCKER_BUILD_ARGS) \
+	docker build $(PLATFORM_FLAG) $(REGISTRY_ARG) $(BUILTIN_VERSION_ARG) $(DOCKER_BUILD_ARGS) \
 		--build-arg HICLAW_CONTROLLER_IMAGE=$(LOCAL_CONTROLLER) \
 		-f manager/Dockerfile.copaw \
 		-t $(LOCAL_MANAGER_COPAW) \
-		./manager/
+		.
+
+build-embedded: build-hiclaw-controller ## Build embedded all-in-one controller image (infra + controller, no agent)
+	@echo "==> Building embedded image: $(LOCAL_EMBEDDED) (registry: $(HIGRESS_REGISTRY))"
+	docker build $(PLATFORM_FLAG) $(REGISTRY_ARG) $(DOCKER_BUILD_ARGS) \
+		--build-arg HICLAW_CONTROLLER_IMAGE=$(LOCAL_CONTROLLER) \
+		-f hiclaw-controller/Dockerfile.embedded \
+		-t $(LOCAL_EMBEDDED) \
+		.
 
 build-worker: ## Build Worker image
 	@echo "==> Building Worker image: $(LOCAL_WORKER) (registry: $(HIGRESS_REGISTRY))"
@@ -173,12 +173,10 @@ build-copaw-worker: ## Build CoPaw Worker image
 
 tag: build ## Tag images for registry push
 	docker tag $(LOCAL_MANAGER) $(MANAGER_TAG)
-	docker tag $(LOCAL_MANAGER_ALIYUN) $(MANAGER_ALIYUN_TAG)
 	docker tag $(LOCAL_WORKER) $(WORKER_TAG)
 	docker tag $(LOCAL_COPAW_WORKER) $(COPAW_WORKER_TAG)
 ifeq ($(PUSH_LATEST),yes)
 	docker tag $(LOCAL_MANAGER) $(MANAGER_IMAGE):latest
-	docker tag $(LOCAL_MANAGER_ALIYUN) $(MANAGER_ALIYUN_IMAGE):latest
 	docker tag $(LOCAL_WORKER) $(WORKER_IMAGE):latest
 	docker tag $(LOCAL_COPAW_WORKER) $(COPAW_WORKER_IMAGE):latest
 	docker tag $(LOCAL_CONTROLLER) $(CONTROLLER_IMAGE):latest
@@ -209,7 +207,7 @@ else
 	fi
 endif
 
-push: push-manager push-manager-aliyun push-manager-copaw push-worker push-copaw-worker push-hiclaw-controller ## Build + push multi-arch images (amd64 + arm64); base image built separately via build-base.yml
+push: push-manager push-manager-copaw push-worker push-copaw-worker push-hiclaw-controller ## Build + push multi-arch images (amd64 + arm64); base image built separately via build-base.yml
 
 push-openclaw-base: buildx-setup ## Build + push multi-arch OpenClaw base image
 	@echo "==> Building + pushing multi-arch OpenClaw base: $(OPENCLAW_BASE_TAG) [$(MULTIARCH_PLATFORMS)]"
@@ -267,8 +265,9 @@ ifeq ($(IS_PODMAN),1)
 		podman build --platform $(plat) \
 			$(REGISTRY_ARG) $(BUILTIN_VERSION_ARG) $(OPENCLAW_BASE_PUSH_ARG) $(SHARED_LIB_CTX) $(DOCKER_BUILD_ARGS) \
 			--build-arg HICLAW_CONTROLLER_IMAGE=$(CONTROLLER_TAG) \
+			-f manager/Dockerfile \
 			--manifest $(MANAGER_TAG) \
-			./manager/ && ) true
+			. && ) true
 	podman manifest push --all $(MANAGER_TAG) docker://$(MANAGER_TAG)
 	$(if $(PUSH_LATEST), \
 		podman manifest push --all $(MANAGER_TAG) docker://$(MANAGER_IMAGE):latest && \
@@ -279,36 +278,9 @@ else
 		--platform $(MULTIARCH_PLATFORMS) \
 		$(REGISTRY_ARG) $(BUILTIN_VERSION_ARG) $(OPENCLAW_BASE_PUSH_ARG) $(SHARED_LIB_CTX) $(DOCKER_BUILD_ARGS) \
 		--build-arg HICLAW_CONTROLLER_IMAGE=$(CONTROLLER_TAG) \
+		-f manager/Dockerfile \
 		-t $(MANAGER_TAG) \
 		$(if $(PUSH_LATEST),-t $(MANAGER_IMAGE):latest) \
-		--push \
-		./manager/
-endif
-
-push-manager-aliyun: buildx-setup ## Build + push multi-arch Manager Aliyun image
-	@echo "==> Building + pushing multi-arch Manager Aliyun: $(MANAGER_ALIYUN_TAG) [$(MULTIARCH_PLATFORMS)]"
-ifeq ($(IS_PODMAN),1)
-	@# Podman: build each platform into a manifest list, then push
-	-podman manifest rm $(MANAGER_ALIYUN_TAG) 2>/dev/null
-	$(foreach plat,$(subst $(comma), ,$(MULTIARCH_PLATFORMS)), \
-		echo "  -> Building Manager Aliyun for $(plat)..." && \
-		podman build --platform $(plat) \
-			$(REGISTRY_ARG) $(BUILTIN_VERSION_ARG) $(OPENCLAW_BASE_PUSH_ARG) $(DOCKER_BUILD_ARGS) \
-			-f manager/Dockerfile.aliyun \
-			--manifest $(MANAGER_ALIYUN_TAG) \
-			. && ) true
-	podman manifest push --all $(MANAGER_ALIYUN_TAG) docker://$(MANAGER_ALIYUN_TAG)
-	$(if $(PUSH_LATEST), \
-		podman manifest push --all $(MANAGER_ALIYUN_TAG) docker://$(MANAGER_ALIYUN_IMAGE):latest && \
-		echo "  -> Also pushed :latest tag")
-else
-	docker buildx build \
-		--builder $(BUILDX_BUILDER) \
-		--platform $(MULTIARCH_PLATFORMS) \
-		$(REGISTRY_ARG) $(BUILTIN_VERSION_ARG) $(OPENCLAW_BASE_PUSH_ARG) $(DOCKER_BUILD_ARGS) \
-		-f manager/Dockerfile.aliyun \
-		-t $(MANAGER_ALIYUN_TAG) \
-		$(if $(PUSH_LATEST),-t $(MANAGER_ALIYUN_IMAGE):latest) \
 		--push \
 		.
 endif
@@ -320,11 +292,11 @@ ifeq ($(IS_PODMAN),1)
 	$(foreach plat,$(subst $(comma), ,$(MULTIARCH_PLATFORMS)), \
 		echo "  -> Building Manager CoPaw for $(plat)..." && \
 		podman build --platform $(plat) \
-			$(REGISTRY_ARG) $(BUILTIN_VERSION_ARG) $(SHARED_LIB_CTX) $(COPAW_WORKER_CTX) $(DOCKER_BUILD_ARGS) \
+			$(REGISTRY_ARG) $(BUILTIN_VERSION_ARG) $(DOCKER_BUILD_ARGS) \
 			--build-arg HICLAW_CONTROLLER_IMAGE=$(CONTROLLER_TAG) \
 			-f manager/Dockerfile.copaw \
 			--manifest $(MANAGER_COPAW_TAG) \
-			./manager/ && ) true
+			. && ) true
 	podman manifest push --all $(MANAGER_COPAW_TAG) docker://$(MANAGER_COPAW_TAG)
 	$(if $(PUSH_LATEST), \
 		podman manifest push --all $(MANAGER_COPAW_TAG) docker://$(MANAGER_COPAW_IMAGE):latest && \
@@ -333,13 +305,13 @@ else
 	docker buildx build \
 		--builder $(BUILDX_BUILDER) \
 		--platform $(MULTIARCH_PLATFORMS) \
-		$(REGISTRY_ARG) $(BUILTIN_VERSION_ARG) $(SHARED_LIB_CTX) $(COPAW_WORKER_CTX) $(DOCKER_BUILD_ARGS) \
+		$(REGISTRY_ARG) $(BUILTIN_VERSION_ARG) $(DOCKER_BUILD_ARGS) \
 		--build-arg HICLAW_CONTROLLER_IMAGE=$(CONTROLLER_TAG) \
 		-f manager/Dockerfile.copaw \
 		-t $(MANAGER_COPAW_TAG) \
 		$(if $(PUSH_LATEST),-t $(MANAGER_COPAW_IMAGE):latest) \
 		--push \
-		./manager/
+		.
 endif
 
 push-worker: buildx-setup ## Build + push multi-arch Worker image
@@ -434,10 +406,10 @@ push-native-copaw-worker: build-copaw-worker ## Push native-arch CoPaw Worker on
 # Usage: make wait-ready [CONTAINER=name]
 .PHONY: wait-ready
 wait-ready:
-	@echo "==> Waiting for Manager services to be ready (container: $(or $(CONTAINER),hiclaw-manager))..."
+	@echo "==> Waiting for Manager services to be ready (container: $(or $(CONTAINER),hiclaw-controller))..."
 	@TIMEOUT=300; ELAPSED=0; \
 	while [ "$$ELAPSED" -lt "$$TIMEOUT" ]; do \
-		RESULT=$$(docker exec $(or $(CONTAINER),hiclaw-manager) bash -c 'curl -s -o /dev/null -w "%{http_code} " "http://127.0.0.1:6167/_matrix/client/versions" 2>/dev/null || echo "000 "; curl -s -o /dev/null -w "%{http_code} " "http://127.0.0.1:9000/minio/health/live" 2>/dev/null || echo "000 "; curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:8001/" 2>/dev/null || echo "000"' 2>/dev/null); \
+		RESULT=$$(docker exec $(or $(CONTAINER),hiclaw-controller) bash -c 'curl -s -o /dev/null -w "%{http_code} " "http://127.0.0.1:6167/_matrix/client/versions" 2>/dev/null || echo "000 "; curl -s -o /dev/null -w "%{http_code} " "http://127.0.0.1:9000/minio/health/live" 2>/dev/null || echo "000 "; curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:8001/" 2>/dev/null || echo "000"' 2>/dev/null); \
 		MATRIX=$$(echo "$$RESULT" | tr -d '\n' | cut -d' ' -f1); \
 		MINIO=$$(echo "$$RESULT" | tr -d '\n' | cut -d' ' -f2); \
 		CONSOLE=$$(echo "$$RESULT" | tr -d '\n' | cut -d' ' -f3); \
@@ -458,7 +430,7 @@ wait-ready:
 test: ## Run integration tests (creates test container)
 ifdef SKIP_INSTALL
 	@echo "==> Running tests against existing installation"
-	@docker exec hiclaw-manager touch /root/manager-workspace/yolo-mode 2>/dev/null || true
+	@docker exec hiclaw-controller touch /root/manager-workspace/yolo-mode 2>/dev/null || true
 	./tests/run-all-tests.sh --skip-build --use-existing $(if $(TEST_FILTER),--test-filter "$(TEST_FILTER)")
 else
 	@echo "==> Installing test Manager and running tests"
@@ -536,10 +508,76 @@ uninstall: ## Stop and remove Manager + all Worker containers
 	fi
 	@echo "==> HiClaw uninstalled"
 
+# ---------- Embedded Install / Uninstall / Test ----------
+
+install-embedded: ## Install in embedded mode (dual-container: controller + agent)
+ifndef SKIP_BUILD
+	$(MAKE) build-embedded build-manager build-manager-copaw build-worker build-copaw-worker
+endif
+	@echo "==> Installing HiClaw (embedded mode)..."
+	HICLAW_NON_INTERACTIVE=1 \
+		HICLAW_EMBEDDED_IMAGE=$(LOCAL_EMBEDDED) \
+		HICLAW_MANAGER_IMAGE=$(if $(filter copaw,$(HICLAW_MANAGER_RUNTIME)),$(LOCAL_MANAGER_COPAW),$(LOCAL_MANAGER)) \
+		HICLAW_WORKER_IMAGE=$(LOCAL_WORKER) \
+		HICLAW_COPAW_WORKER_IMAGE=$(LOCAL_COPAW_WORKER) \
+		HICLAW_MATRIX_E2EE=0 \
+		bash ./install/hiclaw-install-embedded.sh
+
+wait-ready-embedded: ## Wait for embedded-mode services to be ready
+	@echo "==> Waiting for embedded services..."
+	@TIMEOUT=300; ELAPSED=0; \
+	while [ "$$ELAPSED" -lt "$$TIMEOUT" ]; do \
+		RESULT=$$(docker exec hiclaw-controller bash -c 'curl -s -o /dev/null -w "%{http_code} " "http://127.0.0.1:6167/_matrix/client/versions" 2>/dev/null || echo "000 "; curl -s -o /dev/null -w "%{http_code} " "http://127.0.0.1:9000/minio/health/live" 2>/dev/null || echo "000 "; curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:8001/" 2>/dev/null || echo "000"' 2>/dev/null); \
+		MATRIX=$$(echo "$$RESULT" | tr -d '\n' | cut -d' ' -f1); \
+		MINIO=$$(echo "$$RESULT" | tr -d '\n' | cut -d' ' -f2); \
+		CONSOLE=$$(echo "$$RESULT" | tr -d '\n' | cut -d' ' -f3); \
+		AGENT=$$(docker ps --format '{{.Names}}' 2>/dev/null | grep -c '^hiclaw-manager$$' || echo 0); \
+		if [ "$$MATRIX" = "200" ] && [ "$$MINIO" = "200" ] && [ "$$CONSOLE" = "200" ] && [ "$$AGENT" -ge 1 ]; then \
+			echo "==> All services ready (took $${ELAPSED}s)"; \
+			echo "==> Waiting 60s for Manager Agent initialization..."; \
+			sleep 60; \
+			echo "==> Manager Agent should be ready now"; \
+			exit 0; \
+		fi; \
+		sleep 5; \
+		ELAPSED=$$((ELAPSED + 5)); \
+		echo "    Still waiting... ($${ELAPSED}s) Matrix=$$MATRIX MinIO=$$MINIO Console=$$CONSOLE Agent=$$AGENT"; \
+	done; \
+	echo "ERROR: Embedded services did not become ready within $${TIMEOUT}s"; \
+	exit 1
+
+test-embedded: ## Run integration tests in embedded mode
+ifdef SKIP_INSTALL
+	@echo "==> Running tests against existing embedded installation"
+	@docker exec hiclaw-manager touch /root/manager-workspace/yolo-mode 2>/dev/null || true
+	./tests/run-all-tests.sh --skip-build --use-existing $(if $(TEST_FILTER),--test-filter "$(TEST_FILTER)")
+else
+	@echo "==> Installing embedded mode and running tests"
+	$(MAKE) uninstall-embedded 2>/dev/null || true
+	HICLAW_YOLO=1 $(MAKE) install-embedded
+	$(MAKE) wait-ready-embedded
+	./tests/run-all-tests.sh --skip-build --use-existing $(if $(TEST_FILTER),--test-filter "$(TEST_FILTER)")
+endif
+
+uninstall-embedded: ## Stop and remove embedded containers
+	@echo "==> Uninstalling HiClaw (embedded mode)..."
+	-docker stop hiclaw-manager 2>/dev/null && docker rm hiclaw-manager 2>/dev/null || true
+	-docker stop hiclaw-controller 2>/dev/null && docker rm hiclaw-controller 2>/dev/null || true
+	-docker stop hiclaw-manager 2>/dev/null && docker rm hiclaw-manager 2>/dev/null || true
+	@for c in $$(docker ps -a --filter "name=hiclaw-worker-" --format '{{.Names}}' 2>/dev/null); do \
+		echo "  Removing Worker: $$c"; \
+		docker rm -f "$$c" 2>/dev/null || true; \
+	done
+	-docker volume rm hiclaw-data 2>/dev/null && echo "  Removed volume: hiclaw-data" || true
+	@if [ -d "$${HOME}/hiclaw-manager" ]; then \
+		rm -rf "$${HOME}/hiclaw-manager" && echo "  Cleaned workspace: ~/hiclaw-manager"; \
+	fi
+	@echo "==> HiClaw (embedded) uninstalled"
+
 # ---------- Replay ----------
 
 replay: ## Send a task to Manager (TASK="..." or interactive, YOLO mode auto-enabled)
-	@docker exec hiclaw-manager touch /root/manager-workspace/yolo-mode 2>/dev/null || true
+	@docker exec hiclaw-controller touch /root/manager-workspace/yolo-mode 2>/dev/null || true
 ifdef TASK
 	REPLAY_USE_DOCKER_EXEC=1 ./scripts/replay-task.sh "$(TASK)"
 else
@@ -559,7 +597,7 @@ replay-log: ## View the latest replay conversation log
 # ---------- Verify ----------
 
 verify: ## Run post-install verification against the running Manager container
-	@bash ./install/hiclaw-verify.sh $(or $(CONTAINER),hiclaw-manager)
+	@bash ./install/hiclaw-verify.sh $(or $(CONTAINER),hiclaw-controller)
 
 # ---------- Dev utils ----------
 
@@ -569,8 +607,8 @@ status: ## Show status of Manager and all Worker containers
 		|| echo "  (no containers found or Docker not available)"
 
 logs: ## Show recent logs for Manager and all Workers (override with LINES=N, default 50)
-	@echo "==> Manager logs (last $(LINES) lines):"
-	@docker logs hiclaw-manager --tail $(LINES) 2>/dev/null || echo "  (Manager container not found)"
+	@echo "==> Controller logs (last $(LINES) lines):"
+	@docker logs hiclaw-controller --tail $(LINES) 2>/dev/null || echo "  (Controller container not found)"
 	@echo ""
 	@for c in $$(docker ps -a --filter "name=hiclaw-worker-" --format '{{.Names}}' 2>/dev/null); do \
 		echo "==> Worker: $$c (last $(LINES) lines):"; \
@@ -592,7 +630,6 @@ clean: ## Remove local images and test containers
 	-docker ps -a --filter "name=hiclaw-test-worker-" --format '{{.Names}}' | xargs -r docker rm -f 2>/dev/null
 	@echo "==> Removing local images..."
 	-docker rmi $(LOCAL_MANAGER) 2>/dev/null
-	-docker rmi $(LOCAL_MANAGER_ALIYUN) 2>/dev/null
 	-docker rmi $(LOCAL_WORKER) 2>/dev/null
 	-docker rmi $(LOCAL_COPAW_WORKER) 2>/dev/null
 	-docker rmi $(LOCAL_OPENCLAW_BASE) 2>/dev/null

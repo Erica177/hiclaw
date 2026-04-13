@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	v1beta1 "github.com/hiclaw/hiclaw-controller/api/v1beta1"
 	"github.com/hiclaw/hiclaw-controller/internal/agentconfig"
@@ -28,18 +29,22 @@ type WorkerDeployRequest struct {
 	MatrixPassword string
 	AuthorizedMCPs []string
 
+	TeamAdminMatrixID string
+
 	IsUpdate bool
 }
 
 // CoordinationDeployRequest describes coordination context injection for a team leader.
 type CoordinationDeployRequest struct {
-	LeaderName     string
-	Role           string
-	TeamName       string
-	TeamRoomID     string
-	LeaderDMRoomID string
-	TeamWorkers    []string
-	TeamAdminID    string
+	LeaderName        string
+	Role              string
+	TeamName          string
+	TeamRoomID        string
+	LeaderDMRoomID    string
+	HeartbeatEvery    string
+	WorkerIdleTimeout string
+	TeamWorkers       []string
+	TeamAdminID       string
 }
 
 // --- Deployer ---
@@ -50,6 +55,7 @@ type DeployerConfig struct {
 	OSS            oss.StorageClient
 	Executor       *executor.Shell
 	Packages       *executor.PackageResolver
+	Legacy         *LegacyCompat
 	AgentFSDir     string // embedded: /root/hiclaw-fs/agents
 	WorkerAgentDir string // source for builtin agent files
 	MatrixDomain   string
@@ -63,6 +69,7 @@ type Deployer struct {
 	oss            oss.StorageClient
 	executor       *executor.Shell
 	packages       *executor.PackageResolver
+	legacy         *LegacyCompat
 	agentFSDir     string
 	workerAgentDir string
 	matrixDomain   string
@@ -74,6 +81,7 @@ func NewDeployer(cfg DeployerConfig) *Deployer {
 		oss:            cfg.OSS,
 		executor:       cfg.Executor,
 		packages:       cfg.Packages,
+		legacy:         cfg.Legacy,
 		agentFSDir:     cfg.AgentFSDir,
 		workerAgentDir: cfg.WorkerAgentDir,
 		matrixDomain:   cfg.MatrixDomain,
@@ -109,7 +117,11 @@ func (d *Deployer) WriteInlineConfigs(name string, spec v1beta1.WorkerSpec) erro
 		return nil
 	}
 	agentDir := fmt.Sprintf("%s/%s", d.agentFSDir, name)
-	return executor.WriteInlineConfigs(agentDir, spec.Runtime, spec.Identity, spec.Soul, spec.Agents)
+	if err := executor.WriteInlineConfigs(agentDir, spec.Runtime, spec.Identity, spec.Soul, spec.Agents); err != nil {
+		return err
+	}
+	log.Log.Info("inline configs written", "name", name)
+	return nil
 }
 
 // DeployWorkerConfig generates and pushes all configuration files to OSS:
@@ -118,6 +130,15 @@ func (d *Deployer) WriteInlineConfigs(name string, spec v1beta1.WorkerSpec) erro
 func (d *Deployer) DeployWorkerConfig(ctx context.Context, req WorkerDeployRequest) error {
 	logger := log.FromContext(ctx)
 	agentPrefix := fmt.Sprintf("agents/%s", req.Name)
+	localAgentDir := fmt.Sprintf("%s/%s", d.agentFSDir, req.Name)
+
+	// --- Sync local agent files to storage FIRST (base layer) ---
+	// Mirror provides the base: package files, memory, custom skills, etc.
+	// All subsequent PutObject calls overwrite on top with authoritative content.
+	logger.Info("syncing agent files to storage", "name", req.Name)
+	if err := d.oss.Mirror(ctx, localAgentDir+"/", agentPrefix+"/", oss.MirrorOptions{Overwrite: true}); err != nil {
+		logger.Error(err, "agent file sync failed (non-fatal)")
+	}
 
 	// --- openclaw.json ---
 	var channelPolicy *agentconfig.ChannelPolicy
@@ -145,12 +166,20 @@ func (d *Deployer) DeployWorkerConfig(ctx context.Context, req WorkerDeployReque
 		return fmt.Errorf("config push to storage failed: %w", err)
 	}
 
-	// --- SOUL.md (create only, or if inline soul is set) ---
-	if !req.IsUpdate || req.Spec.Soul != "" {
-		soulContent := req.Spec.Soul
-		if soulContent == "" {
-			soulContent = fmt.Sprintf("# %s\n\nYou are %s, an AI worker agent.\n", req.Name, req.Name)
+	// --- SOUL.md ---
+	// Priority: inline spec (user intent) > local file (from package) > generated default.
+	// Inline spec is read directly from memory to avoid local file race with background mc mirror.
+	soulPath := filepath.Join(localAgentDir, "SOUL.md")
+	if req.Spec.Soul != "" {
+		if err := d.oss.PutObject(ctx, agentPrefix+"/SOUL.md", []byte(req.Spec.Soul)); err != nil {
+			logger.Error(err, "SOUL.md push failed (non-fatal)")
 		}
+	} else if soulData, err := os.ReadFile(soulPath); err == nil {
+		if err := d.oss.PutObject(ctx, agentPrefix+"/SOUL.md", soulData); err != nil {
+			logger.Error(err, "SOUL.md push failed (non-fatal)")
+		}
+	} else if !req.IsUpdate {
+		soulContent := fmt.Sprintf("# %s\n\nYou are %s, an AI worker agent.\n", req.Name, req.Name)
 		if err := d.oss.PutObject(ctx, agentPrefix+"/SOUL.md", []byte(soulContent)); err != nil {
 			logger.Error(err, "SOUL.md push failed (non-fatal)")
 		}
@@ -175,20 +204,18 @@ func (d *Deployer) DeployWorkerConfig(ctx context.Context, req WorkerDeployReque
 		}
 	}
 
-	// --- Sync local agent files to storage ---
-	logger.Info("syncing agent files to storage", "name", req.Name)
-	localAgentDir := fmt.Sprintf("%s/%s", d.agentFSDir, req.Name)
-	if err := d.oss.Mirror(ctx, localAgentDir+"/", agentPrefix+"/", oss.MirrorOptions{Overwrite: true}); err != nil {
-		logger.Error(err, "agent file sync failed (non-fatal)")
+	// --- Builtin top-level files (e.g. HEARTBEAT.md for team leaders) ---
+	if err := d.pushBuiltinTopLevelFiles(ctx, req.Name, agentPrefix, req.Role); err != nil {
+		logger.Error(err, "builtin top-level file sync failed (non-fatal)")
 	}
 
 	// --- AGENTS.md: merge builtin section + inject coordination context ---
-	if err := d.prepareAndPushAgentsMD(ctx, req.Name, agentPrefix, req.Role, req.TeamName, req.TeamLeaderName); err != nil {
+	if err := d.prepareAndPushAgentsMD(ctx, req.Name, agentPrefix, req.Role, req.TeamName, req.TeamLeaderName, req.TeamAdminMatrixID, req.Spec.Agents); err != nil {
 		logger.Error(err, "AGENTS.md prepare failed (non-fatal)")
 	}
 
 	// --- Push builtin skills from worker-agent template ---
-	if err := d.pushBuiltinSkills(ctx, req.Name, agentPrefix); err != nil {
+	if err := d.pushBuiltinSkills(ctx, req.Name, agentPrefix, req.Role); err != nil {
 		logger.Error(err, "builtin skills push failed (non-fatal)")
 	}
 
@@ -205,14 +232,16 @@ func (d *Deployer) InjectCoordinationContext(ctx context.Context, req Coordinati
 	}
 
 	coordCtx := agentconfig.CoordinationContext{
-		WorkerName:     req.LeaderName,
-		Role:           req.Role,
-		MatrixDomain:   d.matrixDomain,
-		TeamName:       req.TeamName,
-		TeamRoomID:     req.TeamRoomID,
-		LeaderDMRoomID: req.LeaderDMRoomID,
-		TeamWorkers:    teamWorkers,
-		TeamAdminID:    req.TeamAdminID,
+		WorkerName:        req.LeaderName,
+		Role:              req.Role,
+		MatrixDomain:      d.matrixDomain,
+		TeamName:          req.TeamName,
+		TeamRoomID:        req.TeamRoomID,
+		LeaderDMRoomID:    req.LeaderDMRoomID,
+		HeartbeatEvery:    req.HeartbeatEvery,
+		WorkerIdleTimeout: req.WorkerIdleTimeout,
+		TeamWorkers:       teamWorkers,
+		TeamAdminID:       req.TeamAdminID,
 	}
 
 	existing, _ := d.oss.GetObject(ctx, leaderAgentPrefix+"/AGENTS.md")
@@ -239,20 +268,115 @@ func (d *Deployer) CleanupOSSData(ctx context.Context, workerName string) error 
 	return d.oss.DeletePrefix(ctx, agentPrefix)
 }
 
+// EnsureTeamStorage creates the shared storage directories for a team.
+func (d *Deployer) EnsureTeamStorage(ctx context.Context, teamName string) error {
+	prefix := fmt.Sprintf("teams/%s/", teamName)
+	for _, subdir := range []string{"shared/tasks/", "shared/projects/", "shared/knowledge/"} {
+		if err := d.oss.PutObject(ctx, prefix+subdir+".keep", []byte("")); err != nil {
+			return fmt.Errorf("create %s%s: %w", prefix, subdir, err)
+		}
+	}
+	return nil
+}
+
+// --- Manager Config Deployment ---
+
+// ManagerDeployRequest describes a Manager config deployment (create or update).
+type ManagerDeployRequest struct {
+	Name           string
+	Spec           v1beta1.ManagerSpec
+	MatrixToken    string
+	GatewayKey     string
+	MatrixPassword string
+	AuthorizedMCPs []string
+	IsUpdate       bool
+}
+
+// DeployManagerConfig generates and pushes Manager configuration files to OSS.
+// Unlike Worker, AGENTS.md and builtin skills are managed by the Manager container
+// itself (via upgrade-builtins.sh), so we only push runtime-generated files.
+func (d *Deployer) DeployManagerConfig(ctx context.Context, req ManagerDeployRequest) error {
+	logger := log.FromContext(ctx)
+	agentPrefix := fmt.Sprintf("agents/%s", req.Name)
+
+	// --- openclaw.json ---
+	configJSON, err := d.agentConfig.GenerateOpenClawConfig(agentconfig.WorkerConfigRequest{
+		WorkerName:  req.Name,
+		MatrixToken: req.MatrixToken,
+		GatewayKey:  req.GatewayKey,
+		ModelName:   req.Spec.Model,
+	})
+	if err != nil {
+		return fmt.Errorf("config generation failed: %w", err)
+	}
+	// Use LegacyCompat to write Manager config with mutex protection,
+	// merging groupAllowFrom to avoid overwriting team leader additions.
+	if d.legacy != nil && d.legacy.Enabled() {
+		if err := d.legacy.PutManagerConfig(configJSON); err != nil {
+			return fmt.Errorf("config push to storage failed: %w", err)
+		}
+	} else {
+		if err := d.oss.PutObject(ctx, agentPrefix+"/openclaw.json", configJSON); err != nil {
+			return fmt.Errorf("config push to storage failed: %w", err)
+		}
+	}
+
+	// --- SOUL.md (only if explicitly set in CRD spec) ---
+	if req.Spec.Soul != "" {
+		if err := d.oss.PutObject(ctx, agentPrefix+"/SOUL.md", []byte(req.Spec.Soul)); err != nil {
+			logger.Error(err, "SOUL.md push failed (non-fatal)")
+		}
+	}
+
+	// --- AGENTS.md (only if explicitly set in CRD spec) ---
+	if req.Spec.Agents != "" {
+		if err := d.oss.PutObject(ctx, agentPrefix+"/AGENTS.md", []byte(req.Spec.Agents)); err != nil {
+			logger.Error(err, "AGENTS.md push failed (non-fatal)")
+		}
+	}
+
+	// --- mcporter-servers.json ---
+	if len(req.AuthorizedMCPs) > 0 {
+		mcporterJSON, err := d.agentConfig.GenerateMcporterConfig(req.GatewayKey, "", req.AuthorizedMCPs)
+		if err != nil {
+			logger.Error(err, "mcporter config generation failed (non-fatal)")
+		} else if mcporterJSON != nil {
+			if err := d.oss.PutObject(ctx, agentPrefix+"/mcporter-servers.json", mcporterJSON); err != nil {
+				logger.Error(err, "mcporter config push failed (non-fatal)")
+			}
+		}
+	}
+
+	// --- Matrix password for E2EE re-login ---
+	if req.MatrixPassword != "" {
+		if err := d.oss.PutObject(ctx, agentPrefix+"/credentials/matrix/password", []byte(req.MatrixPassword)); err != nil {
+			logger.Error(err, "failed to write Matrix password to storage (non-fatal)")
+		}
+	}
+
+	return nil
+}
+
 // --- Internal helpers ---
 
 // prepareAndPushAgentsMD merges the builtin AGENTS.md section and injects
 // coordination context in a single OSS read-write cycle.
-func (d *Deployer) prepareAndPushAgentsMD(ctx context.Context, workerName, agentPrefix, role, teamName, teamLeaderName string) error {
-	builtinPath := d.workerAgentDir + "/AGENTS.md"
+func (d *Deployer) prepareAndPushAgentsMD(ctx context.Context, workerName, agentPrefix, role, teamName, teamLeaderName, teamAdminMatrixID, inlineAgents string) error {
+	builtinPath := filepath.Join(d.builtinAgentDir(role), "AGENTS.md")
 	builtinContent, err := os.ReadFile(builtinPath)
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("read builtin AGENTS.md: %w", err)
 	}
 
-	existing, _ := d.oss.GetObject(ctx, agentPrefix+"/AGENTS.md")
-
-	content := string(existing)
+	// Priority: inline spec (user intent) > OSS (from package).
+	// Read inline directly from memory to avoid local file race with background mc mirror.
+	var content string
+	if inlineAgents != "" {
+		content = inlineAgents
+	} else {
+		existing, _ := d.oss.GetObject(ctx, agentPrefix+"/AGENTS.md")
+		content = string(existing)
+	}
 	if len(builtinContent) > 0 {
 		content = agentconfig.MergeBuiltinSection(content, string(builtinContent))
 	}
@@ -262,6 +386,7 @@ func (d *Deployer) prepareAndPushAgentsMD(ctx context.Context, workerName, agent
 		MatrixDomain:   d.matrixDomain,
 		TeamName:       teamName,
 		TeamLeaderName: teamLeaderName,
+		TeamAdminID:    teamAdminMatrixID,
 	}
 	if role == "team_leader" {
 		coordCtx.Role = "team_leader"
@@ -276,8 +401,8 @@ func (d *Deployer) prepareAndPushAgentsMD(ctx context.Context, workerName, agent
 }
 
 // pushBuiltinSkills copies builtin skill directories from the worker-agent template to OSS.
-func (d *Deployer) pushBuiltinSkills(ctx context.Context, workerName, agentPrefix string) error {
-	skillsDir := d.workerAgentDir + "/skills"
+func (d *Deployer) pushBuiltinSkills(ctx context.Context, workerName, agentPrefix, role string) error {
+	skillsDir := filepath.Join(d.builtinAgentDir(role), "skills")
 	entries, err := os.ReadDir(skillsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -298,4 +423,32 @@ func (d *Deployer) pushBuiltinSkills(ctx context.Context, workerName, agentPrefi
 		}
 	}
 	return nil
+}
+
+func (d *Deployer) pushBuiltinTopLevelFiles(ctx context.Context, workerName, agentPrefix, role string) error {
+	agentDir := d.builtinAgentDir(role)
+	for _, name := range []string{"HEARTBEAT.md"} {
+		src := filepath.Join(agentDir, name)
+		content, err := os.ReadFile(src)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return err
+		}
+		if err := d.oss.PutObject(ctx, agentPrefix+"/"+name, content); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (d *Deployer) builtinAgentDir(role string) string {
+	baseDir := filepath.Dir(d.workerAgentDir)
+	switch role {
+	case "team_leader":
+		return filepath.Join(baseDir, "team-leader-agent")
+	default:
+		return d.workerAgentDir
+	}
 }

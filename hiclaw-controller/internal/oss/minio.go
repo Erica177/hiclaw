@@ -77,6 +77,10 @@ func (c *MinIOClient) GetObject(ctx context.Context, key string) ([]byte, error)
 	}
 	out, err := c.runMC(ctx, "cat", c.fullPath(key))
 	if err != nil {
+		if strings.Contains(err.Error(), "Object does not exist") ||
+			strings.Contains(err.Error(), "exit status") {
+			return nil, os.ErrNotExist
+		}
 		return nil, err
 	}
 	return []byte(out), nil
@@ -108,6 +112,14 @@ func (c *MinIOClient) DeleteObject(ctx context.Context, key string) error {
 func (c *MinIOClient) Mirror(ctx context.Context, src, dst string, opts MirrorOptions) error {
 	if err := c.ensureAlias(ctx); err != nil {
 		return err
+	}
+	// Apply storage prefix to paths that are not local (don't start with /).
+	// This makes Mirror consistent with PutObject/GetObject which auto-prefix keys.
+	if !strings.HasPrefix(src, "/") {
+		src = c.fullPath(src)
+	}
+	if !strings.HasPrefix(dst, "/") {
+		dst = c.fullPath(dst)
 	}
 	args := []string{"mirror", src, dst}
 	if opts.Overwrite {
@@ -147,6 +159,16 @@ func (c *MinIOClient) ListObjects(ctx context.Context, prefix string) ([]string,
 		}
 	}
 	return names, nil
+}
+
+// EnsureBucket creates the configured bucket if it does not already exist.
+func (c *MinIOClient) EnsureBucket(ctx context.Context) error {
+	if err := c.ensureAlias(ctx); err != nil {
+		return err
+	}
+	target := c.config.Alias + "/" + c.config.Bucket
+	_, err := c.runMC(ctx, "mb", target, "--ignore-existing")
+	return err
 }
 
 func (c *MinIOClient) runMC(ctx context.Context, args ...string) (string, error) {

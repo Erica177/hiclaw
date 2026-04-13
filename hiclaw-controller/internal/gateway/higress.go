@@ -9,6 +9,7 @@ import (
 	"math/rand"
 	"net/http"
 	"strings"
+	"log"
 	"sync"
 	"time"
 )
@@ -45,27 +46,56 @@ func (c *HigressClient) ensureSession(ctx context.Context) error {
 		return nil
 	}
 
-	body := fmt.Sprintf(`{"username":%q,"password":%q}`, c.config.AdminUser, c.config.AdminPassword)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		c.config.ConsoleURL+"/session/login",
-		strings.NewReader(body))
+	// Initialize admin account on first boot (idempotent — succeeds if already initialized).
+	// Higress Console requires /system/init before login works.
+	// Race note: the Higress all-in-one base image may auto-initialize with admin/admin
+	// before we get here. We retry init to win the race when possible.
+	initBody := fmt.Sprintf(`{"adminUser":{"name":%q,"password":%q,"displayName":%q}}`,
+		c.config.AdminUser, c.config.AdminPassword, c.config.AdminUser)
+	initReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		c.config.ConsoleURL+"/system/init",
+		strings.NewReader(initBody))
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.http.Do(req)
+	initReq.Header.Set("Content-Type", "application/json")
+	initResp, err := c.http.Do(initReq)
 	if err != nil {
-		return fmt.Errorf("higress login: %w", err)
+		return fmt.Errorf("higress init: %w", err)
 	}
-	defer resp.Body.Close()
+	initResp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return fmt.Errorf("higress login: HTTP %d", resp.StatusCode)
+	// Try login with configured password first, then fallback to default admin/admin
+	// (Higress all-in-one may have auto-initialized with default credentials).
+	passwords := []string{c.config.AdminPassword}
+	if c.config.AdminPassword != "admin" {
+		passwords = append(passwords, "admin")
 	}
 
-	c.cookies = resp.Cookies()
-	return nil
+	for _, pw := range passwords {
+		body := fmt.Sprintf(`{"username":%q,"password":%q}`, c.config.AdminUser, pw)
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+			c.config.ConsoleURL+"/session/login",
+			strings.NewReader(body))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := c.http.Do(req)
+		if err != nil {
+			return fmt.Errorf("higress login: %w", err)
+		}
+
+		if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated {
+			c.cookies = resp.Cookies()
+			resp.Body.Close()
+			return nil
+		}
+		resp.Body.Close()
+	}
+
+	return fmt.Errorf("higress login: all credential attempts failed")
 }
 
 func (c *HigressClient) EnsureConsumer(ctx context.Context, req ConsumerRequest) (*ConsumerResult, error) {
@@ -178,10 +208,15 @@ func (c *HigressClient) modifyAIRoutes(ctx context.Context, consumerName string,
 			consumers := toStringSlice(authConfig["allowedConsumers"])
 
 			if add {
-				if containsString(consumers, consumerName) {
-					break // already authorized
+				if !containsString(consumers, consumerName) {
+					consumers = append(consumers, consumerName)
+					authConfig["allowedConsumers"] = consumers
+					route["authConfig"] = authConfig
 				}
-				consumers = append(consumers, consumerName)
+				// Always PUT to trigger WASM key-auth resync — the consumer
+				// may have been created after the route was last written,
+				// so WASM needs to reload credentials even if the name was
+				// already in allowedConsumers.
 			} else {
 				consumers = removeString(consumers, consumerName)
 			}
@@ -309,10 +344,10 @@ func (c *HigressClient) ExposePort(ctx context.Context, req PortExposeRequest) e
 	if err := c.ensureDomain(ctx, domain); err != nil {
 		return fmt.Errorf("expose port %d: %w", req.Port, err)
 	}
-	if err := c.ensureServiceSource(ctx, svcSrc, dnsHost, req.Port); err != nil {
+	if err := c.ensureServiceSource(ctx, svcSrc, dnsHost, req.Port, "http"); err != nil {
 		return fmt.Errorf("expose port %d: %w", req.Port, err)
 	}
-	if err := c.ensureRoute(ctx, routeN, []string{domain}, svcSrc+".dns", req.Port); err != nil {
+	if err := c.ensureRoute(ctx, routeN, []string{domain}, svcSrc+".dns", req.Port, "/"); err != nil {
 		return fmt.Errorf("expose port %d: %w", req.Port, err)
 	}
 	return nil
@@ -332,6 +367,86 @@ func (c *HigressClient) UnexposePort(ctx context.Context, req PortExposeRequest)
 	return nil
 }
 
+// --- Public infrastructure init methods (used by Initializer) ---
+
+func (c *HigressClient) EnsureServiceSource(ctx context.Context, name, domain string, port int, protocol string) error {
+	return c.ensureServiceSource(ctx, name, domain, port, protocol)
+}
+
+func (c *HigressClient) EnsureStaticServiceSource(ctx context.Context, name, address string, port int) error {
+	return c.ensureStaticServiceSource(ctx, name, address, port)
+}
+
+func (c *HigressClient) EnsureRoute(ctx context.Context, name string, domains []string, serviceName string, port int, pathPrefix string) error {
+	return c.ensureRoute(ctx, name, domains, serviceName, port, pathPrefix)
+}
+
+func (c *HigressClient) DeleteRoute(ctx context.Context, name string) error {
+	c.deleteRoute(ctx, name)
+	return nil
+}
+
+func (c *HigressClient) EnsureAIProvider(ctx context.Context, req AIProviderRequest) error {
+	body := map[string]interface{}{
+		"name":     req.Name,
+		"type":     req.Type,
+		"tokens":   req.Tokens,
+		"protocol": req.Protocol,
+	}
+	if req.Raw != nil {
+		body["rawConfigs"] = req.Raw
+	}
+	_, sc, err := c.doJSON(ctx, http.MethodPost, "/v1/ai/providers", body)
+	if err != nil {
+		return fmt.Errorf("ensure AI provider %s: %w", req.Name, err)
+	}
+	if sc == 200 || sc == 201 || sc == 409 {
+		return nil
+	}
+	return fmt.Errorf("ensure AI provider %s: HTTP %d", req.Name, sc)
+}
+
+func (c *HigressClient) EnsureAIRoute(ctx context.Context, req AIRouteRequest) error {
+	body := map[string]interface{}{
+		"name":    req.Name,
+		"domains": []string{},
+		"pathPredicate": map[string]interface{}{
+			"matchType":     "PRE",
+			"matchValue":    req.PathPrefix,
+			"caseSensitive": false,
+		},
+		"upstreams": []map[string]interface{}{
+			{"provider": req.Provider, "weight": 100, "modelMapping": map[string]interface{}{}},
+		},
+	}
+	// Always enable key-auth on AI routes so the auth framework is in place.
+	// Consumers are bound later via AuthorizeAIRoutes after they are created.
+	body["authConfig"] = map[string]interface{}{
+		"enabled":                true,
+		"allowedCredentialTypes": []string{"key-auth"},
+		"allowedConsumers":       req.AllowedConsumers,
+	}
+	_, sc, err := c.doJSON(ctx, http.MethodPost, "/v1/ai/routes", body)
+	if err != nil {
+		return fmt.Errorf("ensure AI route %s: %w", req.Name, err)
+	}
+	if sc == 200 || sc == 201 || sc == 409 {
+		return nil
+	}
+	return fmt.Errorf("ensure AI route %s: HTTP %d", req.Name, sc)
+}
+
+func (c *HigressClient) Healthy(ctx context.Context) error {
+	_, sc, err := c.doJSON(ctx, http.MethodGet, "/v1/consumers", nil)
+	if err != nil {
+		return err
+	}
+	if sc != http.StatusOK {
+		return fmt.Errorf("higress health check: HTTP %d", sc)
+	}
+	return nil
+}
+
 // ── Higress Console primitives (migrated from controller/higress_client.go) ──
 
 func (c *HigressClient) ensureDomain(ctx context.Context, name string) error {
@@ -346,10 +461,13 @@ func (c *HigressClient) ensureDomain(ctx context.Context, name string) error {
 	return nil
 }
 
-func (c *HigressClient) ensureServiceSource(ctx context.Context, name, dnsDomain string, port int) error {
+func (c *HigressClient) ensureServiceSource(ctx context.Context, name, dnsDomain string, port int, protocol string) error {
+	if protocol == "" {
+		protocol = "http"
+	}
 	body := map[string]interface{}{
 		"type": "dns", "name": name, "domain": dnsDomain,
-		"port": port, "protocol": "http",
+		"port": port, "protocol": protocol,
 		"properties": map[string]interface{}{},
 		"authN":      map[string]interface{}{"enabled": false},
 	}
@@ -363,11 +481,31 @@ func (c *HigressClient) ensureServiceSource(ctx context.Context, name, dnsDomain
 	return nil
 }
 
-func (c *HigressClient) ensureRoute(ctx context.Context, name string, domains []string, serviceName string, port int) error {
+func (c *HigressClient) ensureStaticServiceSource(ctx context.Context, name, address string, port int) error {
+	body := map[string]interface{}{
+		"type": "static", "name": name, "domain": fmt.Sprintf("%s:%d", address, port),
+		"port": port, "protocol": "http",
+		"properties": map[string]interface{}{},
+		"authN":      map[string]interface{}{"enabled": false},
+	}
+	_, sc, err := c.doJSON(ctx, http.MethodPost, "/v1/service-sources", body)
+	if err != nil {
+		return fmt.Errorf("ensure static service source %s: %w", name, err)
+	}
+	if sc != 200 && sc != 201 && sc != 409 {
+		return fmt.Errorf("ensure static service source %s: HTTP %d", name, sc)
+	}
+	return nil
+}
+
+func (c *HigressClient) ensureRoute(ctx context.Context, name string, domains []string, serviceName string, port int, pathPrefix string) error {
+	if pathPrefix == "" {
+		pathPrefix = "/"
+	}
 	body := map[string]interface{}{
 		"name":    name,
 		"domains": domains,
-		"path":    map[string]interface{}{"matchType": "PRE", "matchValue": "/", "caseSensitive": false},
+		"path":    map[string]interface{}{"matchType": "PRE", "matchValue": pathPrefix, "caseSensitive": false},
 		"services": []map[string]interface{}{
 			{"name": serviceName, "port": port, "weight": 100},
 		},
@@ -481,6 +619,30 @@ func (c *HigressClient) doJSON(ctx context.Context, method, path string, reqBody
 }
 
 // ── helpers ──
+
+// TriggerPush asks istiod to push config to Envoy immediately.
+// No-op if PilotURL is not configured. Errors are logged but do not propagate.
+func (c *HigressClient) TriggerPush() {
+	if c.config.PilotURL == "" {
+		return
+	}
+	log.Printf("[gateway] TriggerPush: pushing config to Envoy via %s", c.config.PilotURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.config.PilotURL+"/debug/adsz?push=true", nil)
+	if err != nil {
+		log.Printf("[gateway] TriggerPush: build request: %v", err)
+		return
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		log.Printf("[gateway] TriggerPush: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	log.Printf("[gateway] TriggerPush: HTTP %d, response: %s", resp.StatusCode, string(body))
+}
 
 func toStringSlice(v interface{}) []string {
 	if v == nil {

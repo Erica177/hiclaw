@@ -10,10 +10,20 @@
 # Configuration
 # ============================================================
 
-# Auto-detect Manager container name if not set
-if [ -z "${TEST_MANAGER_CONTAINER}" ]; then
-    export TEST_MANAGER_CONTAINER="$(docker ps --format '{{.Names}}' 2>/dev/null | grep -E '^hiclaw-manager' | head -1)"
-    export TEST_MANAGER_CONTAINER="${TEST_MANAGER_CONTAINER:-hiclaw-manager}"
+# Auto-detect infrastructure container (embedded controller or legacy manager)
+if [ -z "${TEST_CONTROLLER_CONTAINER}" ]; then
+    export TEST_CONTROLLER_CONTAINER="$(docker ps --format '{{.Names}}' 2>/dev/null | grep -E '^hiclaw-controller$' | head -1)"
+    # Fallback: legacy container name
+    if [ -z "${TEST_CONTROLLER_CONTAINER}" ]; then
+        export TEST_CONTROLLER_CONTAINER="$(docker ps --format '{{.Names}}' 2>/dev/null | grep -E '^hiclaw-manager$' | head -1)"
+    fi
+    export TEST_CONTROLLER_CONTAINER="${TEST_CONTROLLER_CONTAINER:-hiclaw-controller}"
+fi
+
+# Auto-detect Manager Agent container (separate container in embedded-controller mode)
+if [ -z "${TEST_AGENT_CONTAINER}" ]; then
+    export TEST_AGENT_CONTAINER="$(docker ps --format '{{.Names}}' 2>/dev/null | grep -E '^hiclaw-manager(-|$)' | head -1)"
+    export TEST_AGENT_CONTAINER="${TEST_AGENT_CONTAINER:-${TEST_CONTROLLER_CONTAINER}}"
 fi
 
 # Host where the Manager container's exposed ports are reachable
@@ -174,33 +184,33 @@ wait_for_manager_agent_ready() {
     local timeout="${1:-300}"
     local room_id="${2:-}"
     local access_token="${3:-}"
-    local manager_container="${TEST_MANAGER_CONTAINER:-hiclaw-manager-test}"
+    local infra_container="${TEST_CONTROLLER_CONTAINER:-hiclaw-manager}"
+    local agent_container="${TEST_AGENT_CONTAINER:-${infra_container}}"
     local manager_user="manager"
     local matrix_domain="${TEST_MATRIX_DOMAIN:-matrix-local.hiclaw.io:${TEST_GATEWAY_PORT}}"
 
     local elapsed=0
 
-    # Detect Manager runtime
+    # Detect Manager runtime (check agent container first, then infra)
     local manager_runtime
-    manager_runtime=$(docker exec "${manager_container}" printenv HICLAW_MANAGER_RUNTIME 2>/dev/null || echo "openclaw")
+    manager_runtime=$(docker exec "${agent_container}" printenv HICLAW_MANAGER_RUNTIME 2>/dev/null || \
+                      docker exec "${infra_container}" printenv HICLAW_MANAGER_RUNTIME 2>/dev/null || echo "openclaw")
 
-    # Phase 1: Wait for Manager to be healthy (runtime-specific)
-    log_info "Waiting for Manager ${manager_runtime} runtime to be healthy..."
+    # Phase 1: Wait for Manager Agent to be healthy (runtime-specific, on agent container)
+    log_info "Waiting for Manager ${manager_runtime} runtime to be healthy (container: ${agent_container})..."
     local runtime_ready=false
 
     while [ "${elapsed}" -lt "${timeout}" ]; do
         case "${manager_runtime}" in
             copaw)
-                # CoPaw: check port 18799 or process
-                if docker exec "${manager_container}" pgrep -f "copaw app" >/dev/null 2>&1 && \
-                   docker exec "${manager_container}" curl -sf http://127.0.0.1:18799/ >/dev/null 2>&1; then
+                if docker exec "${agent_container}" pgrep -f "copaw app" >/dev/null 2>&1 && \
+                   docker exec "${agent_container}" curl -sf http://127.0.0.1:18799/ >/dev/null 2>&1; then
                     runtime_ready=true
                     break
                 fi
                 ;;
             *)
-                # OpenClaw: check gateway health
-                if docker exec "${manager_container}" openclaw gateway health --json 2>/dev/null | grep -q '"ok"'; then
+                if docker exec "${agent_container}" openclaw gateway health --json 2>/dev/null | grep -q '"ok"'; then
                     runtime_ready=true
                     break
                 fi
@@ -219,6 +229,7 @@ wait_for_manager_agent_ready() {
     log_info "${manager_runtime} runtime is healthy (took ${elapsed}s)"
 
     # Phase 2: Wait for Manager to join the DM room (if room_id and token provided)
+    # Matrix API calls go via infrastructure container (where Tuwunel runs)
     if [ -n "${room_id}" ] && [ -n "${access_token}" ]; then
         log_info "Waiting for Manager to join DM room..."
         local manager_full_id="@${manager_user}:${matrix_domain}"
@@ -227,7 +238,7 @@ wait_for_manager_agent_ready() {
         local room_enc="${room_id//!/%21}"
         while [ "${elapsed}" -lt "${timeout}" ]; do
             local members
-            members=$(docker exec "${manager_container}" curl -sf -X GET \
+            members=$(docker exec "${infra_container}" curl -sf -X GET \
                 -H "Authorization: Bearer ${access_token}" \
                 "http://127.0.0.1:6167/_matrix/client/v3/rooms/${room_enc}/members" 2>/dev/null | \
                 jq -r '.chunk[].state_key' 2>/dev/null) || true
@@ -283,7 +294,7 @@ wait_for_worker_container() {
 # This reads HICLAW_* environment variables from the container and sets
 # TEST_* variables accordingly. Call this after the container is running.
 detect_manager_config() {
-    local container="${TEST_MANAGER_CONTAINER:-hiclaw-manager}"
+    local container="${TEST_CONTROLLER_CONTAINER:-hiclaw-manager}"
     
     # Skip if container is not running
     if ! docker ps --format '{{.Names}}' | grep -q "^${container}$"; then
@@ -383,10 +394,35 @@ require_llm_key() {
 # Docker helpers
 # ============================================================
 
-# Run a command inside the Manager container.
+# Run a command inside the infrastructure container (Matrix, MinIO, Higress, controller).
 # Used by matrix-client.sh and minio-client.sh to avoid exposing Matrix/MinIO ports to host.
 exec_in_manager() {
-    docker exec "${TEST_MANAGER_CONTAINER:-hiclaw-manager}" "$@"
+    docker exec "${TEST_CONTROLLER_CONTAINER:-hiclaw-manager}" "$@"
+}
+
+# Run a command inside the Manager Agent container.
+# In legacy mode (all-in-one manager), this falls back to the same container.
+# In embedded-controller mode, this targets the separate agent container.
+exec_in_agent() {
+    docker exec "${TEST_AGENT_CONTAINER:-${TEST_CONTROLLER_CONTAINER:-hiclaw-manager}}" "$@"
+}
+
+# Copy a file between containers via tar pipe (avoids host filesystem symlink issues on macOS).
+# Usage: copy_to_agent <src_path_in_controller> <dst_path_in_agent>
+copy_to_agent() {
+    local src_path="$1"
+    local dst_path="$2"
+    local src_dir dst_dir src_file
+    src_dir=$(dirname "${src_path}")
+    src_file=$(basename "${src_path}")
+    dst_dir=$(dirname "${dst_path}")
+    exec_in_agent mkdir -p "${dst_dir}" 2>/dev/null
+    # Use docker cp via host temp dir for reliability (tar pipe can truncate)
+    local tmp_host="/tmp/.hiclaw-copy-$$"
+    mkdir -p "${tmp_host}"
+    docker cp "${TEST_CONTROLLER_CONTAINER}:${src_path}" "${tmp_host}/${src_file}" 2>/dev/null
+    docker cp "${tmp_host}/${src_file}" "${TEST_AGENT_CONTAINER}:${dst_path}" 2>/dev/null
+    rm -rf "${tmp_host}"
 }
 
 start_worker_container() {

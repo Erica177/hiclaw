@@ -200,7 +200,7 @@ wait_for_worker_session_stable() {
 wait_for_session_stable() {
     local stable_seconds="${1:-5}"
     local max_wait="${2:-60}"
-    local manager_container="${TEST_MANAGER_CONTAINER:-hiclaw-manager}"
+    local manager_container="${TEST_AGENT_CONTAINER:-${TEST_CONTROLLER_CONTAINER:-hiclaw-manager}}"
     local manager_session_dir="/root/manager-workspace/.openclaw/agents/main/sessions"
 
     log_info "Waiting for Manager session to stabilize (up to ${max_wait}s)..." >&2
@@ -214,7 +214,8 @@ wait_for_session_stable() {
         session=$(get_latest_session "$manager_container" "$manager_session_dir")
         local size=0
         if [ -n "$session" ]; then
-            size=$(docker exec "$manager_container" sh -c "wc -c < '${session}' 2>/dev/null || echo 0")
+            size=$(docker exec "$manager_container" sh -c "wc -c < '${session}' 2>/dev/null || echo 0" | tr -dc '0-9')
+            size=${size:-0}
         fi
 
         if [ "$size" -eq "$last_size" ]; then
@@ -246,7 +247,7 @@ wait_for_session_stable() {
 snapshot_baseline() {
     local workers=("$@")
 
-    local manager_container="${TEST_MANAGER_CONTAINER:-hiclaw-manager}"
+    local manager_container="${TEST_AGENT_CONTAINER:-${TEST_CONTROLLER_CONTAINER:-hiclaw-manager}}"
     local manager_session_dir="/root/manager-workspace/.openclaw/agents/main/sessions"
 
     local snapshot_result='{"offsets": {}}'
@@ -381,7 +382,7 @@ collect_delta_metrics() {
     shift 2
     local workers=("$@")
 
-    local manager_container="${TEST_MANAGER_CONTAINER:-hiclaw-manager}"
+    local manager_container="${TEST_AGENT_CONTAINER:-${TEST_CONTROLLER_CONTAINER:-hiclaw-manager}}"
     local manager_session_dir="/root/manager-workspace/.openclaw/agents/main/sessions"
 
     # Initialize result structure
@@ -448,7 +449,7 @@ collect_test_metrics() {
     shift
     local workers=("$@")
     
-    local manager_container="${TEST_MANAGER_CONTAINER:-hiclaw-manager}"
+    local manager_container="${TEST_AGENT_CONTAINER:-${TEST_CONTROLLER_CONTAINER:-hiclaw-manager}}"
     local manager_session_dir="/root/manager-workspace/.openclaw/agents/main/sessions"
     
     # Initialize result structure

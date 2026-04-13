@@ -32,10 +32,10 @@ rules:
     resources: ["events"]
     verbs: ["create", "patch"]
   - apiGroups: ["hiclaw.io"]
-    resources: ["workers", "teams", "humans"]
+    resources: ["workers", "teams", "humans", "managers"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["hiclaw.io"]
-    resources: ["workers/status", "teams/status", "humans/status"]
+    resources: ["workers/status", "teams/status", "humans/status", "managers/status"]
     verbs: ["get", "update", "patch"]
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
@@ -67,6 +67,15 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: hiclaw-worker
+  labels:
+    {{- include "hiclaw.component.labels" (dict "root" . "component" "controller") | nindent 4 }}
+rules: []
+---
+{{- /* ClusterRole for Manager ServiceAccount (same pattern as hiclaw-worker). */}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hiclaw-manager
   labels:
     {{- include "hiclaw.component.labels" (dict "root" . "component" "controller") | nindent 4 }}
 rules: []

@@ -15,6 +15,7 @@ import (
 	"github.com/hiclaw/hiclaw-controller/internal/credentials"
 	"github.com/hiclaw/hiclaw-controller/internal/executor"
 	"github.com/hiclaw/hiclaw-controller/internal/gateway"
+	"github.com/hiclaw/hiclaw-controller/internal/initializer"
 	"github.com/hiclaw/hiclaw-controller/internal/matrix"
 	"github.com/hiclaw/hiclaw-controller/internal/oss"
 	"github.com/hiclaw/hiclaw-controller/internal/server"
@@ -104,6 +105,34 @@ func (a *App) Start(ctx context.Context) error {
 			logger.Error(err, "HTTP server failed")
 		}
 	}()
+
+	// Run cluster initialization in both embedded and incluster modes.
+	{
+		init := &initializer.Initializer{
+			OSS:     a.oss,
+			Matrix:  a.matrix,
+			Gateway: a.gateway,
+			RestCfg: a.restCfg,
+			Config: initializer.Config{
+				ManagerEnabled: a.cfg.ManagerEnabled,
+				ManagerModel:   a.cfg.ManagerModel,
+				ManagerRuntime: a.cfg.ManagerRuntime,
+				ManagerImage:   a.cfg.ManagerImage,
+				AdminUser:      a.cfg.MatrixAdminUser,
+				AdminPassword:  a.cfg.MatrixAdminPassword,
+				Namespace:      a.namespace,
+				IsEmbedded:     a.cfg.KubeMode == "embedded",
+				LLMProvider:    a.cfg.LLMProvider,
+				LLMAPIKey:      a.cfg.LLMAPIKey,
+				OpenAIBaseURL:  a.cfg.OpenAIBaseURL,
+				TuwunelURL:     a.cfg.MatrixServerURL,
+				ElementWebURL:  a.cfg.ElementWebURL,
+			},
+		}
+		if err := init.Run(ctx); err != nil {
+			logger.Error(err, "cluster initialization failed (non-fatal, continuing)")
+		}
+	}
 
 	logger.Info("hiclaw-controller ready",
 		"kubeMode", a.cfg.KubeMode,
@@ -206,26 +235,26 @@ func (a *App) initServiceLayer(_ context.Context) error {
 		AdminUser:    cfg.MatrixAdminUser,
 	})
 
+	a.envBuilder = service.NewWorkerEnvBuilder(cfg.WorkerEnv)
+
+	if cfg.KubeMode == "embedded" {
+		a.legacy = service.NewLegacyCompat(service.LegacyConfig{
+			OSS:          a.oss,
+			MatrixDomain: cfg.MatrixDomain,
+			AgentFSDir:   cfg.AgentFSDir(),
+		})
+	}
+
 	a.deployer = service.NewDeployer(service.DeployerConfig{
 		AgentConfig:    a.agentGen,
 		OSS:            a.oss,
 		Executor:       a.shell,
 		Packages:       a.packages,
+		Legacy:         a.legacy,
 		AgentFSDir:     cfg.AgentFSDir(),
 		WorkerAgentDir: cfg.WorkerAgentDir(),
 		MatrixDomain:   cfg.MatrixDomain,
 	})
-
-	a.envBuilder = service.NewWorkerEnvBuilder(cfg.WorkerEnv)
-
-	if cfg.KubeMode == "embedded" {
-		a.legacy = service.NewLegacyCompat(service.LegacyConfig{
-			ManagerConfigPath: cfg.ManagerConfigPath(),
-			RegistryPath:      cfg.RegistryPath(),
-			Executor:          a.shell,
-			MatrixDomain:      cfg.MatrixDomain,
-		})
-	}
 
 	return nil
 }
@@ -260,6 +289,25 @@ func (a *App) initReconcilers(_ context.Context) error {
 		return fmt.Errorf("setup HumanReconciler: %w", err)
 	}
 
+	mgrReconciler := &controller.ManagerReconciler{
+		Client:           a.mgr.GetClient(),
+		Provisioner:      a.provisioner,
+		Deployer:         a.deployer,
+		Backend:          a.registry,
+		EnvBuilder:       a.envBuilder,
+		ManagerResources: a.cfg.ManagerResources(),
+	}
+	if a.cfg.KubeMode == "embedded" {
+		mgrReconciler.EmbeddedConfig = &controller.ManagerEmbeddedConfig{
+			WorkspaceDir: a.cfg.ManagerWorkspaceDir,
+			HostShareDir: a.cfg.HostShareDir,
+			ExtraEnv:     a.cfg.ManagerAgentEnv(),
+		}
+	}
+	if err := mgrReconciler.SetupWithManager(a.mgr); err != nil {
+		return fmt.Errorf("setup ManagerReconciler: %w", err)
+	}
+
 	return nil
 }
 
@@ -268,6 +316,7 @@ func (a *App) initHTTPServer(_ context.Context) error {
 		Client:     a.mgr.GetClient(),
 		Backend:    a.registry,
 		Gateway:    a.gateway,
+		OSS:        a.oss,
 		STS:        a.stsService,
 		AuthMw:     a.authMw,
 		KubeMode:   a.cfg.KubeMode,

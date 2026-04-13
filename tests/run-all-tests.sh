@@ -64,7 +64,7 @@ HICLAW_PORT_GATEWAY)        export TEST_GATEWAY_PORT="${value}" ;;
             esac
         done < "${env_file}"
     fi
-    export TEST_MANAGER_CONTAINER="hiclaw-manager"
+    export TEST_CONTROLLER_CONTAINER="hiclaw-controller"
 }
 
 if [ "${USE_EXISTING}" = true ]; then
@@ -94,6 +94,9 @@ cleanup() {
     fi
 
     log "Cleaning up..."
+    docker stop hiclaw-controller 2>/dev/null || true
+    docker rm hiclaw-controller 2>/dev/null || true
+    # Legacy container name
     docker stop hiclaw-manager 2>/dev/null || true
     docker rm hiclaw-manager 2>/dev/null || true
 
@@ -130,14 +133,17 @@ if [ "${USE_EXISTING}" = true ]; then
     log "  Manager host: ${TEST_MANAGER_HOST}"
 
     # Verify the Manager is actually running (Matrix is not exposed; check via docker exec)
-    if ! docker exec "${TEST_MANAGER_CONTAINER}" curl -sf "http://127.0.0.1:6167/_matrix/client/versions" > /dev/null 2>&1; then
-        error "Manager does not appear to be running (container: ${TEST_MANAGER_CONTAINER}). Start it with 'make install' first."
+    if ! docker exec "${TEST_CONTROLLER_CONTAINER}" curl -sf "http://127.0.0.1:6167/_matrix/client/versions" > /dev/null 2>&1; then
+        error "Manager does not appear to be running (container: ${TEST_CONTROLLER_CONTAINER}). Start it with 'make install' first."
     fi
     log "Manager is reachable"
 
     # Enable YOLO mode for test run (auto-decision, no interactive prompts)
-    docker exec "${TEST_MANAGER_CONTAINER}" touch /root/manager-workspace/yolo-mode 2>/dev/null && \
-        log "YOLO mode enabled (${TEST_MANAGER_CONTAINER})" || \
+    # Try agent container first (embedded mode), fall back to manager container (legacy mode)
+    agent_container="$(docker ps --format '{{.Names}}' 2>/dev/null | grep -E '^hiclaw-manager(-|$)' | head -1)"
+    agent_container="${agent_container:-${TEST_CONTROLLER_CONTAINER}}"
+    docker exec "${agent_container}" touch /root/manager-workspace/yolo-mode 2>/dev/null && \
+        log "YOLO mode enabled (${agent_container})" || \
         log "WARNING: Could not enable YOLO mode (container may differ)"
 else
     log "Installing Manager via install script..."
@@ -165,8 +171,10 @@ else
     log "  Console port:   ${TEST_CONSOLE_PORT}"
 
     # Enable YOLO mode for test run
-    docker exec "${TEST_MANAGER_CONTAINER}" touch /root/manager-workspace/yolo-mode 2>/dev/null && \
-        log "YOLO mode enabled (${TEST_MANAGER_CONTAINER})" || true
+    agent_container="$(docker ps --format '{{.Names}}' 2>/dev/null | grep -E '^hiclaw-manager(-|$)' | head -1)"
+    agent_container="${agent_container:-${TEST_CONTROLLER_CONTAINER}}"
+    docker exec "${agent_container}" touch /root/manager-workspace/yolo-mode 2>/dev/null && \
+        log "YOLO mode enabled (${agent_container})" || true
 fi
 
 # ============================================================
@@ -176,6 +184,7 @@ fi
 # so Manager uses English regardless of host timezone/locale.
 
 source "${SCRIPT_DIR}/lib/matrix-client.sh"
+source "${SCRIPT_DIR}/lib/agent-metrics.sh"
 
 _setup_manager_identity() {
     log "Configuring Manager identity (English)..."
@@ -195,7 +204,12 @@ _setup_manager_identity() {
     fi
 
     # Check if identity is already configured
-    if docker exec "${TEST_MANAGER_CONTAINER}" test -f /root/manager-workspace/soul-configured 2>/dev/null; then
+    # Check in agent container (embedded mode) or manager container (legacy mode)
+    local _agent
+    _agent="$(docker ps --format '{{.Names}}' 2>/dev/null | grep -E '^hiclaw-manager(-|$)' | head -1)"
+    _agent="${_agent:-${TEST_CONTROLLER_CONTAINER}}"
+
+    if docker exec "${_agent}" test -f /root/manager-workspace/soul-configured 2>/dev/null; then
         log "Manager identity already configured, skipping"
         return 0
     fi
@@ -221,7 +235,7 @@ Please update your SOUL.md with these preferences, then run: touch ~/soul-config
     # Wait for Manager to process and touch soul-configured (up to 120s)
     local elapsed=0
     while [ "${elapsed}" -lt 120 ]; do
-        if docker exec "${TEST_MANAGER_CONTAINER}" test -f /root/manager-workspace/soul-configured 2>/dev/null; then
+        if docker exec "${_agent}" test -f /root/manager-workspace/soul-configured 2>/dev/null; then
             # soul-configured exists, but Manager's Matrix reply may still be in flight.
             # Wait for the reply to arrive in the DM room so subsequent tests don't
             # pick it up as their own reply (race condition with test-02).
@@ -276,6 +290,9 @@ done
 for test_file in "${TESTS[@]}"; do
     test_name=$(basename "${test_file}" .sh)
     log "Running: ${test_name}"
+
+    # Wait for Manager to finish processing previous test before starting next
+    wait_for_session_stable 10 120
 
     if bash "${test_file}"; then
         RESULTS+=("PASS: ${test_name}")

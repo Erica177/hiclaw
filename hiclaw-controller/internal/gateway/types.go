@@ -5,6 +5,7 @@ type Config struct {
 	ConsoleURL    string // gateway console API, e.g. http://127.0.0.1:8001
 	AdminUser     string // console login username
 	AdminPassword string // console login password
+	PilotURL      string // istiod debug API, e.g. http://127.0.0.1:15014 (embedded mode only)
 }
 
 // ConsumerRequest describes a gateway consumer to create.
@@ -39,4 +40,21 @@ type PortExposeRequest struct {
 	ServiceHost string // DNS hostname of the service
 	Port        int    // port number to expose
 	Domain      string // domain name to bind
+}
+
+// AIProviderRequest describes an LLM provider to register in the gateway.
+type AIProviderRequest struct {
+	Name     string // provider name, e.g. "qwen"
+	Type     string // provider type, e.g. "qwen", "openai"
+	Tokens   []string
+	Protocol string            // e.g. "openai/v1"
+	Raw      map[string]interface{} // provider-specific raw config
+}
+
+// AIRouteRequest describes an AI route to create.
+type AIRouteRequest struct {
+	Name             string
+	PathPrefix       string   // e.g. "/v1"
+	Provider         string   // upstream provider name
+	AllowedConsumers []string // consumers authorized for this route
 }
