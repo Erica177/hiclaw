@@ -1,6 +1,6 @@
 ---
 name: debug-analysis
-description: Analyze and debug target Workers by syncing their workspace files, exporting Matrix room messages, and reviewing LLM session logs. Only available on DebugWorkers.
+description: Use when you need to generate debug logs, export Matrix messages, analyze LLM session logs, or investigate issues by cross-referencing with hiclaw source code. Only available on DebugWorkers.
 ---
 
 # Debug Analysis
@@ -21,19 +21,18 @@ Target Workers' files are available at `~/debug-targets/<worker-name>/`. Always 
 
 ## Commands
 
-### Sync target workspaces (pull latest from centralized storage)
+### Sync Target Workspace
+Pull the latest workspace of a specific target worker from OSS before analysis.
 
-Sync all targets:
 ```bash
+bash ~/skills/debug-analysis/scripts/sync-workspace.sh --worker <name>
 bash ~/skills/debug-analysis/scripts/sync-workspace.sh --all
 ```
 
-Sync a specific target:
-```bash
-bash ~/skills/debug-analysis/scripts/sync-workspace.sh --worker <name>
-```
+IMPORTANT: Always sync the target workspace BEFORE reading any files from it.
 
-### Export Matrix room messages
+### Export Matrix Messages
+Export recent Matrix room messages using the configured matrixCredential.
 
 Export messages from a specific room (last 24 hours by default):
 ```bash
@@ -45,9 +44,45 @@ Export messages from a room by name substring:
 bash ~/skills/debug-analysis/scripts/export-matrix-messages.sh --room-name 'Worker' --hours 6
 ```
 
+List all joined rooms:
+```bash
+bash ~/skills/debug-analysis/scripts/export-matrix-messages.sh --list-rooms
+```
+
 The output is JSONL format printed to stdout. Each line is a JSON object with fields: `event_id`, `type`, `sender`, `timestamp`, `time`, `body`.
 
 **Note**: Matrix credentials must be configured in `~/debug-config.json` for message export to work. The homeserver URL is read from `openclaw.json`.
+
+### Generate Debug Log
+Aggregate session logs, Matrix messages, and state files into a structured debug report.
+
+```bash
+bash ~/skills/debug-analysis/scripts/generate-debug-log.sh \
+  --worker <name> --hours 24
+```
+
+Generate a report with specific sections only:
+```bash
+bash ~/skills/debug-analysis/scripts/generate-debug-log.sh \
+  --worker <name> --hours 24 \
+  --include-sessions --include-matrix --include-state
+```
+
+Save report to a file:
+```bash
+bash ~/skills/debug-analysis/scripts/generate-debug-log.sh \
+  --worker <name> --hours 24 \
+  --output ~/debug-report.md
+```
+
+By default all sections are included: agent config, state files, LLM session logs, and Matrix messages. Use `--include-*` flags to select specific sections only. Output goes to stdout unless `--output` is specified.
+
+### Analyze with Source Code
+If `hiclawVersion` was specified when creating this DebugWorker, the hiclaw source code is available at `~/hiclaw-source/`. When investigating issues, cross-reference:
+- Agent behavior rules: `manager/agent/*/AGENTS.md`
+- Skill implementations: `manager/agent/skills/*/`
+- Controller reconcile logic: `hiclaw-controller/internal/controller/`
+- Worker config generation: `hiclaw-controller/internal/executor/`
 
 ## Debugging Workflow
 
@@ -56,4 +91,6 @@ The output is JSONL format printed to stdout. Each line is a JSON object with fi
 3. **Review** LLM session logs (`.openclaw/agents/main/sessions/*.jsonl`) to trace conversation flow
 4. **Export** Matrix messages to see inter-agent communication and human interactions
 5. **Check** `openclaw.json` for misconfigurations (wrong model, missing plugins, etc.)
-6. **Report** findings with evidence (specific log entries, message excerpts, config issues)
+6. **Cross-reference** with hiclaw source code (if available at `~/hiclaw-source/`) to verify expected behavior
+7. **Generate** a debug report for structured findings: `generate-debug-log.sh --worker <name>`
+8. **Report** findings with evidence (specific log entries, message excerpts, config issues)

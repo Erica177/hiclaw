@@ -131,6 +131,17 @@ if [ -f "${DEBUG_CONFIG}" ]; then
     fi
 
     log "DebugWorker targets mounted at ${DEBUG_TARGETS_DIR}"
+
+    # Pull hiclaw source code from OSS if available
+    HICLAW_SOURCE_DIR="/root/debug/hiclaw-source"
+    if mc ls "${HICLAW_STORAGE_PREFIX}/agents/${WORKER_NAME}/hiclaw-source/" >/dev/null 2>&1; then
+        log "Pulling hiclaw source code from OSS..."
+        mkdir -p "${HICLAW_SOURCE_DIR}"
+        mc mirror "${HICLAW_STORAGE_PREFIX}/agents/${WORKER_NAME}/hiclaw-source/" \
+            "${HICLAW_SOURCE_DIR}/" --overwrite 2>/dev/null || true
+        ln -sfn "${HICLAW_SOURCE_DIR}" "${WORKSPACE}/hiclaw-source"
+        log "HiClaw source code available at ${HICLAW_SOURCE_DIR}"
+    fi
 fi
 
 # ============================================================

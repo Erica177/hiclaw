@@ -1,9 +1,13 @@
 package controller
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,6 +36,7 @@ type DebugWorkerReconciler struct {
 	OSS            oss.StorageClient
 	OSSAdmin       oss.StorageAdminClient // nil in incluster mode
 	WorkerAgentDir string                 // source dir for debug-analysis skill files
+	SourceRepoURL  string                 // GitHub repo URL for source download, e.g. "https://github.com/higress-group/hiclaw"
 }
 
 // debugConfig is pushed to OSS for the DebugWorker's entrypoint and skills.
@@ -115,6 +120,13 @@ func (r *DebugWorkerReconciler) handleCreate(ctx context.Context, dw *v1beta1.De
 	// 2. Push debug-analysis skill files to OSS
 	if err := r.pushDebugAnalysisSkill(ctx, dwName); err != nil {
 		logger.Error(err, "failed to push debug-analysis skill (non-fatal)")
+	}
+
+	// 2b. Push hiclaw source code to OSS (non-fatal)
+	if dw.Spec.HiclawVersion != "" {
+		if err := r.pushHiclawSource(ctx, dwName, dw.Spec.HiclawVersion); err != nil {
+			logger.Error(err, "failed to push hiclaw source (non-fatal)", "version", dw.Spec.HiclawVersion)
+		}
 	}
 
 	// 3. Build the child Worker CRD
@@ -296,6 +308,123 @@ func (r *DebugWorkerReconciler) failCreate(ctx context.Context, dw *v1beta1.Debu
 	dw.Status.Message = msg
 	_ = r.Status().Update(ctx, dw)
 	return reconcile.Result{RequeueAfter: time.Minute}, fmt.Errorf("%s", msg)
+}
+
+// pushHiclawSource downloads the hiclaw source tarball from GitHub and pushes
+// the extracted contents to OSS under agents/{dwName}/hiclaw-source/.
+func (r *DebugWorkerReconciler) pushHiclawSource(ctx context.Context, dwName, version string) error {
+	if r.SourceRepoURL == "" {
+		return fmt.Errorf("SourceRepoURL not configured")
+	}
+
+	// GitHub tarball URL: https://github.com/{owner}/{repo}/archive/refs/tags/{version}.tar.gz
+	// For branches: https://github.com/{owner}/{repo}/archive/refs/heads/{branch}.tar.gz
+	tarURL := fmt.Sprintf("%s/archive/refs/tags/%s.tar.gz", r.SourceRepoURL, version)
+
+	// Download tarball
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, tarURL, nil)
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	httpClient := &http.Client{Timeout: 5 * time.Minute}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("download source tarball: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		// Try branch URL as fallback (version might be a branch name like "main")
+		tarURL = fmt.Sprintf("%s/archive/refs/heads/%s.tar.gz", r.SourceRepoURL, version)
+		req2, err := http.NewRequestWithContext(ctx, http.MethodGet, tarURL, nil)
+		if err != nil {
+			return fmt.Errorf("create fallback request: %w", err)
+		}
+		resp.Body.Close()
+		resp, err = httpClient.Do(req2)
+		if err != nil {
+			return fmt.Errorf("download source tarball (branch fallback): %w", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("source tarball not found (tag or branch %q): HTTP %d", version, resp.StatusCode)
+		}
+	}
+
+	// Extract to temp dir
+	tmpDir, err := os.MkdirTemp("", "hiclaw-source-*")
+	if err != nil {
+		return fmt.Errorf("create temp dir: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	if err := extractTarGz(resp.Body, tmpDir); err != nil {
+		return fmt.Errorf("extract tarball: %w", err)
+	}
+
+	// GitHub tarballs extract to a single top-level directory like "hiclaw-v1.0.0/"
+	// Find it and use it as the source root
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		return fmt.Errorf("read temp dir: %w", err)
+	}
+	srcRoot := tmpDir
+	if len(entries) == 1 && entries[0].IsDir() {
+		srcRoot = filepath.Join(tmpDir, entries[0].Name())
+	}
+
+	// Mirror to OSS
+	dstPrefix := fmt.Sprintf("agents/%s/hiclaw-source/", dwName)
+	return r.OSS.Mirror(ctx, srcRoot+"/", dstPrefix, oss.MirrorOptions{Overwrite: true})
+}
+
+// extractTarGz extracts a .tar.gz stream to dstDir.
+func extractTarGz(r io.Reader, dstDir string) error {
+	gz, err := gzip.NewReader(r)
+	if err != nil {
+		return err
+	}
+	defer gz.Close()
+
+	tr := tar.NewReader(gz)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+
+		target := filepath.Join(dstDir, hdr.Name)
+
+		// Guard against zip slip
+		if !strings.HasPrefix(filepath.Clean(target), filepath.Clean(dstDir)+string(os.PathSeparator)) {
+			continue
+		}
+
+		switch hdr.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				return err
+			}
+		case tar.TypeReg:
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
+			}
+			f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(hdr.Mode))
+			if err != nil {
+				return err
+			}
+			// Limit extracted file size to 10MB to avoid resource exhaustion
+			if _, err := io.Copy(f, io.LimitReader(tr, 10<<20)); err != nil {
+				f.Close()
+				return err
+			}
+			f.Close()
+		}
+	}
+	return nil
 }
 
 func boolPtr(b bool) *bool { return &b }

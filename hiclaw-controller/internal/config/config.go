@@ -285,6 +285,12 @@ func (c *Config) WorkerAgentDir() string {
 	return envOrDefault("HICLAW_WORKER_AGENT_DIR", "/opt/hiclaw/agent/worker-agent")
 }
 
+// SourceRepoURL returns the GitHub repository URL for downloading hiclaw source code.
+// Used by DebugWorkerReconciler to push source code to OSS for cross-referencing.
+func (c *Config) SourceRepoURL() string {
+	return envOrDefault("HICLAW_SOURCE_REPO_URL", "https://github.com/higress-group/hiclaw")
+}
+
 // ManagerConfigPath returns the path to the Manager Agent's openclaw.json (embedded mode).
 func (c *Config) ManagerConfigPath() string {
 	return envOrDefault("HICLAW_MANAGER_CONFIG_PATH", "/root/openclaw.json")

@@ -313,6 +313,7 @@ func (a *App) initReconcilers(_ context.Context) error {
 		OSS:            a.oss,
 		OSSAdmin:       a.ossAdmin,
 		WorkerAgentDir: a.cfg.WorkerAgentDir(),
+		SourceRepoURL:  a.cfg.SourceRepoURL(),
 	}).SetupWithManager(a.mgr); err != nil {
 		return fmt.Errorf("setup DebugWorkerReconciler: %w", err)
 	}
