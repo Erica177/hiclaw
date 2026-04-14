@@ -308,6 +308,15 @@ func (a *App) initReconcilers(_ context.Context) error {
 		return fmt.Errorf("setup ManagerReconciler: %w", err)
 	}
 
+	if err := (&controller.DebugWorkerReconciler{
+		Client:         a.mgr.GetClient(),
+		OSS:            a.oss,
+		OSSAdmin:       a.ossAdmin,
+		WorkerAgentDir: a.cfg.WorkerAgentDir(),
+	}).SetupWithManager(a.mgr); err != nil {
+		return fmt.Errorf("setup DebugWorkerReconciler: %w", err)
+	}
+
 	return nil
 }
 

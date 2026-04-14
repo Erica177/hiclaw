@@ -95,7 +95,9 @@ if [ "$SKIP_BUILD" = "0" ]; then
 
     # Controller
     log "Building controller image..."
-    docker build -t "$CONTROLLER_IMAGE" -f "${PROJECT_ROOT}/hiclaw-controller/Dockerfile" "${PROJECT_ROOT}/hiclaw-controller"
+    docker build -t "$CONTROLLER_IMAGE" \
+        --build-context agent="${PROJECT_ROOT}/manager/agent" \
+        -f "${PROJECT_ROOT}/hiclaw-controller/Dockerfile" "${PROJECT_ROOT}/hiclaw-controller"
 
     # Manager (choose between all-in-one and k8s-lightweight)
     if [ "$BUILD_K8S_IMAGE" = "1" ]; then

@@ -97,6 +97,43 @@ ln -sfn "${HOME}/skills" "${HOME}/.agents/skills"
 log "Worker config pulled successfully"
 
 # ============================================================
+# Step 2b: DebugWorker mode detection
+# ============================================================
+DEBUG_CONFIG="${WORKSPACE}/debug-config.json"
+if [ -f "${DEBUG_CONFIG}" ]; then
+    log "DebugWorker mode detected"
+
+    # Parse targets from debug-config.json
+    HICLAW_DEBUG_TARGETS=$(jq -r '.targets | join(",")' "${DEBUG_CONFIG}")
+    export HICLAW_DEBUG_TARGETS
+
+    # Pull each target workspace (read-only snapshots)
+    DEBUG_TARGETS_DIR="${HICLAW_ROOT}/debug-targets"
+    mkdir -p "${DEBUG_TARGETS_DIR}"
+    for target in $(echo "${HICLAW_DEBUG_TARGETS}" | tr ',' ' '); do
+        log "Pulling target workspace: ${target}"
+        mkdir -p "${DEBUG_TARGETS_DIR}/${target}"
+        ensure_mc_credentials 2>/dev/null || true
+        mc mirror "${HICLAW_STORAGE_PREFIX}/agents/${target}/" \
+            "${DEBUG_TARGETS_DIR}/${target}/" --overwrite 2>/dev/null || true
+    done
+
+    # Create symlink from workspace for easy access
+    ln -sfn "${DEBUG_TARGETS_DIR}" "${WORKSPACE}/debug-targets"
+
+    # Export MatrixCredential env vars for debug-analysis skill scripts
+    MATRIX_USER_ID=$(jq -r '.matrixCredential.userID // empty' "${DEBUG_CONFIG}")
+    MATRIX_ACCESS_TOKEN=$(jq -r '.matrixCredential.accessToken // empty' "${DEBUG_CONFIG}")
+    if [ -n "${MATRIX_USER_ID}" ]; then
+        export HICLAW_DEBUG_MATRIX_USER_ID="${MATRIX_USER_ID}"
+        export HICLAW_DEBUG_MATRIX_ACCESS_TOKEN="${MATRIX_ACCESS_TOKEN}"
+        log "Matrix debug credentials loaded for user: ${MATRIX_USER_ID}"
+    fi
+
+    log "DebugWorker targets mounted at ${DEBUG_TARGETS_DIR}"
+fi
+
+# ============================================================
 # Optional: ensure diagnostics-otel npm dependencies are present
 # When CMS metrics are enabled, generate-worker-config.sh injects
 # diagnostics-otel into openclaw.json.  The plugin ships with
@@ -334,6 +371,23 @@ if [ -n "${HICLAW_CONTROLLER_URL:-}${HICLAW_ORCHESTRATOR_URL:-}" ]; then
         done
     ) &
     log "Background readiness reporter started (PID: $!)"
+fi
+
+# ============================================================
+# Step 5d: DebugWorker target workspace periodic sync
+# ============================================================
+if [ -n "${HICLAW_DEBUG_TARGETS:-}" ]; then
+(
+    while true; do
+        sleep 300
+        ensure_mc_credentials 2>/dev/null || true
+        for target in $(echo "${HICLAW_DEBUG_TARGETS}" | tr ',' ' '); do
+            mc mirror "${HICLAW_STORAGE_PREFIX}/agents/${target}/" \
+                "${HICLAW_ROOT}/debug-targets/${target}/" --overwrite 2>/dev/null || true
+        done
+    done
+) &
+    log "DebugWorker periodic target sync started (every 5m, PID: $!)"
 fi
 
 exec openclaw gateway run --verbose --force
