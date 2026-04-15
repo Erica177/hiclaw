@@ -236,9 +236,18 @@ log "HOME set to ${HOME} (workspace files will be synced to MinIO)"
                 --exclude ".cache/**" --exclude ".npm/**" \
                 --exclude ".local/**" --exclude ".mc/**" --exclude "*.lock" \
                 --exclude ".last-pull" \
-                --exclude ".openclaw/matrix/**" --exclude ".openclaw/canvas/**" 2>&1; then
+                --exclude ".openclaw/matrix/**" --exclude ".openclaw/canvas/**" \
+                --exclude "SOUL.md" --exclude "AGENTS.md" --exclude "HEARTBEAT.md" 2>&1; then
                 log "WARNING: Local->Remote sync failed"
             fi
+            # Push manager-managed files individually only if locally modified after last pull.
+            # This allows agents to sync their own edits (e.g. personality evolution in SOUL.md)
+            # while preventing stale package content from overwriting controller-pushed inline content.
+            for _mf in SOUL.md AGENTS.md HEARTBEAT.md; do
+                if [ -f "${WORKSPACE}/${_mf}" ] && [ "${WORKSPACE}/${_mf}" -nt "${PULL_MARKER}" ]; then
+                    mc cp "${WORKSPACE}/${_mf}" "${HICLAW_STORAGE_PREFIX}/agents/${WORKER_NAME}/${_mf}" 2>/dev/null || true
+                fi
+            done
         fi
         sleep 5
     done
@@ -355,48 +364,25 @@ export OPENCLAW_NO_RESPAWN=1
 # ============================================================
 # Step 5c: Background readiness reporter
 # ============================================================
-# Poll local gateway health and report ready to controller when healthy.
-if [ -n "${HICLAW_CONTROLLER_URL:-}${HICLAW_ORCHESTRATOR_URL:-}" ]; then
-    _CONTROLLER_URL="${HICLAW_CONTROLLER_URL:-${HICLAW_ORCHESTRATOR_URL:-}}"
+# Wait for local gateway health, then report ready via hiclaw CLI.
+if [ -n "${HICLAW_CONTROLLER_URL:-}" ]; then
 (
-        # Build auth header (SA token for embedded mode, API key for cloud mode)
-        AUTH_HEADER=""
-        if [ -n "${HICLAW_AUTH_TOKEN:-}" ]; then
-            AUTH_HEADER="Authorization: Bearer ${HICLAW_AUTH_TOKEN}"
-        elif [ -n "${HICLAW_WORKER_API_KEY:-}" ]; then
-            AUTH_HEADER="Authorization: Bearer ${HICLAW_WORKER_API_KEY}"
-        fi
-
-        # Phase 1: Wait for initial readiness (with timeout)
+        # Phase 1: Wait for gateway to be healthy (with timeout)
         TIMEOUT=120; ELAPSED=0
         while [ "${ELAPSED}" -lt "${TIMEOUT}" ]; do
             if openclaw gateway health --json 2>/dev/null | grep -q '"ok"' 2>/dev/null; then
-                for _attempt in 1 2 3; do
-                    if curl -sf -X POST "${_CONTROLLER_URL}/api/v1/workers/${WORKER_NAME}/ready" \
-                        ${AUTH_HEADER:+-H "${AUTH_HEADER}"} 2>/dev/null; then
-                        log "Reported ready to controller"
-                        break 2
-                    fi
-                    sleep 2
-                done
-                log "WARNING: POST to controller failed, will retry health check loop"
+                break
             fi
             sleep 5; ELAPSED=$((ELAPSED + 5))
         done
 
         if [ "${ELAPSED}" -ge "${TIMEOUT}" ]; then
-            log "WARNING: readiness reporter timed out after ${TIMEOUT}s"
+            log "WARNING: readiness reporter timed out waiting for gateway after ${TIMEOUT}s"
             exit 1
         fi
 
-        # Phase 2: Periodic heartbeat (every 60s) — self-heals after controller restart
-        while true; do
-            sleep 60
-            if openclaw gateway health --json 2>/dev/null | grep -q '"ok"' 2>/dev/null; then
-                curl -sf -X POST "${_CONTROLLER_URL}/api/v1/workers/${WORKER_NAME}/ready" \
-                    ${AUTH_HEADER:+-H "${AUTH_HEADER}"} 2>/dev/null || true
-            fi
-        done
+        # Report ready to controller via hiclaw CLI
+        hiclaw worker report-ready
     ) &
     log "Background readiness reporter started (PID: $!)"
 fi
