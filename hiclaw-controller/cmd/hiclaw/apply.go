@@ -159,7 +159,6 @@ func applyWorkerSubCmd() *cobra.Command {
 		soul       string
 		soulFile   string
 		skills     string
-		mcpServers string
 		packageURI string
 		expose     string
 		team       string
@@ -187,7 +186,7 @@ func applyWorkerSubCmd() *cobra.Command {
 			}
 
 			return applyWorkerParams(name, model, runtime, image, identity, soul, soulFile,
-				skills, mcpServers, packageURI, expose, team, role)
+				skills, packageURI, expose, team, role)
 		},
 	}
 
@@ -200,7 +199,6 @@ func applyWorkerSubCmd() *cobra.Command {
 	cmd.Flags().StringVar(&soul, "soul", "", "Worker SOUL.md content (inline)")
 	cmd.Flags().StringVar(&soulFile, "soul-file", "", "Path to SOUL.md file")
 	cmd.Flags().StringVar(&skills, "skills", "", "Comma-separated built-in skills")
-	cmd.Flags().StringVar(&mcpServers, "mcp-servers", "", "Comma-separated MCP servers")
 	cmd.Flags().StringVar(&packageURI, "package", "", "Package URI (nacos://, http://, oss://)")
 	cmd.Flags().StringVar(&expose, "expose", "", "Comma-separated ports to expose")
 	cmd.Flags().StringVar(&team, "team", "", "Team name")
@@ -274,7 +272,7 @@ func applyWorkerZip(name, zipPath, runtimeOverride string) error {
 
 // applyWorkerParams creates or updates a Worker from CLI flags (upsert semantics).
 func applyWorkerParams(name, model, runtime, image, identity, soul, soulFile,
-	skills, mcpServers, packageURI, expose, team, role string) error {
+	skills, packageURI, expose, team, role string) error {
 
 	if model == "" {
 		model = defaultWorkerModel()
@@ -313,9 +311,6 @@ func applyWorkerParams(name, model, runtime, image, identity, soul, soulFile,
 	setIfNotEmpty(req, "role", role)
 	if skills != "" {
 		req["skills"] = splitCSV(skills)
-	}
-	if mcpServers != "" {
-		req["mcpServers"] = splitCSV(mcpServers)
 	}
 	if expose != "" {
 		req["expose"] = parseExposePorts(expose)
